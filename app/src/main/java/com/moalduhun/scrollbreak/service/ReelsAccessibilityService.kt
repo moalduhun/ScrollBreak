@@ -48,32 +48,55 @@ class ReelsAccessibilityService : AccessibilityService() {
         if (now < suppressUntilMs) return
 
         when (event.eventType) {
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> checkForReels(now)
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> checkForReels(now, event)
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
                 if (now - lastContentCheckMs >= CONTENT_CHECK_THROTTLE_MS) {
                     lastContentCheckMs = now
-                    checkForReels(now)
+                    checkForReels(now, event)
                 }
             }
         }
     }
 
-    private fun checkForReels(now: Long) {
+    private fun checkForReels(now: Long, event: AccessibilityEvent) {
         val root = rootInActiveWindow ?: return
         val result = try {
             ReelsDetector.evaluate(root)
         } catch (t: Throwable) {
             // Never let a malformed node tree crash the accessibility service — that
             // would silently disable blocking until the user re-enables it manually.
-            Log.w(TAG, "Detection failed", t)
+            Log.w(DIAG_TAG, "Detection failed", t)
             return
         }
 
+        logDiagnostics(event, result)
+
         if (result.isReels) {
-            Log.d(TAG, "Reels detected, signals=${result.matchedSignals}")
+            Log.d(DIAG_TAG, ">>> BLOCKING, signals=${result.matchedSignals}")
             suppressUntilMs = now + BLOCK_SUPPRESSION_MS
             launchBlockScreen()
             scope.launch { repository.recordBlock() }
+        }
+    }
+
+    /**
+     * Prints exactly what the detector saw on this screen, so real Instagram behaviour can
+     * be captured with `adb logcat -s ScrollBreakDiag:V` and used to replace guessed
+     * keywords/thresholds with real ones. Safe to leave on: it only runs at the same
+     * throttled rate as detection itself, and every value here already came from the
+     * accessibility tree Instagram exposes to any accessibility service.
+     */
+    private fun logDiagnostics(event: AccessibilityEvent, result: ReelsDetector.DetectionResult) {
+        val eventName = AccessibilityEvent.eventTypeToString(event.eventType)
+        val windowClass = event.className ?: "unknown"
+        Log.d(DIAG_TAG, "--- check event=$eventName windowClass=$windowClass isReels=${result.isReels} ---")
+        if (result.matchedSignals.isNotEmpty()) {
+            Log.d(DIAG_TAG, "matched=${result.matchedSignals}")
+        }
+        if (result.diagnostics.isEmpty()) {
+            Log.d(DIAG_TAG, "no clips/reel-flavoured nodes on this screen")
+        } else {
+            result.diagnostics.forEach { Log.d(DIAG_TAG, it) }
         }
     }
 
@@ -100,7 +123,7 @@ class ReelsAccessibilityService : AccessibilityService() {
     }
 
     companion object {
-        private const val TAG = "ReelsAccessibility"
+        private const val DIAG_TAG = "ScrollBreakDiag"
         private const val INSTAGRAM_PACKAGE = "com.instagram.android"
         private const val CONTENT_CHECK_THROTTLE_MS = 400L
         private const val BLOCK_SUPPRESSION_MS = 1500L

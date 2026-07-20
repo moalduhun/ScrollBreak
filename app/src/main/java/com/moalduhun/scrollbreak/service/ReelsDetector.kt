@@ -27,16 +27,22 @@ import android.view.accessibility.AccessibilityNodeInfo
  * agreeing.
  *
  * Instagram also reuses the "clips" widget classes and id prefixes for small Reels
- * *previews* — the recommendation shelf on the Home feed, grid thumbnails on Search and
- * on a profile's Reels tab. Matching on keywords alone caught those too and blocked
- * screens that were not actually playing a Reel. A class/id hit only counts now if the
- * matching node fills nearly the whole screen, which is true for the immersive player but
- * not for a shelf card or a grid thumbnail.
+ * *previews* — the recommendation shelf on the Home feed, grid thumbnails on Search, and
+ * on a profile's Reels tab. A class/id hit only counts toward blocking if the matching
+ * node fills nearly the whole screen, which is true for the immersive player but not for
+ * a shelf card or a grid thumbnail.
+ *
+ * Every keyword/threshold here is a guess made without a real Instagram install to test
+ * against. [DetectionResult.diagnostics] exists so the guesses can be replaced with real
+ * data: it records every node this pass saw that even loosely looks Reels-related, plus
+ * whichever bottom-tab item is currently selected, regardless of whether it counted
+ * toward the block decision. See [ReelsAccessibilityService] for where this gets logged.
  */
 object ReelsDetector {
 
     private const val MAX_NODES = 600
     private const val MAX_DEPTH = 30
+    private const val MAX_DIAGNOSTIC_LINES = 40
 
     // A node must cover at least this fraction of the window's width/height to be
     // considered "full-screen" rather than a small preview thumbnail or shelf card.
@@ -58,15 +64,24 @@ object ReelsDetector {
     )
     private val REELS_TAB_CONTENT_DESC = listOf("reels")
 
-    data class DetectionResult(val isReels: Boolean, val matchedSignals: List<String>)
+    // Broader than the keywords above on purpose — this only feeds diagnostics, not the
+    // block decision, so it is meant to surface things the strict keyword list misses.
+    private val DIAGNOSTIC_KEYWORDS = listOf("clip", "reel")
+
+    data class DetectionResult(
+        val isReels: Boolean,
+        val matchedSignals: List<String>,
+        val diagnostics: List<String>
+    )
 
     fun evaluate(root: AccessibilityNodeInfo?): DetectionResult {
-        if (root == null) return DetectionResult(false, emptyList())
+        if (root == null) return DetectionResult(false, emptyList(), emptyList())
 
         val windowBounds = Rect().also { root.getBoundsInScreen(it) }
         val hasUsableWindowBounds = windowBounds.width() > 0 && windowBounds.height() > 0
 
         val matched = mutableSetOf<String>()
+        val diagnostics = mutableListOf<String>()
         var nodesVisited = 0
         var reelsTabSelected = false
         var hasLikeAction = false
@@ -83,8 +98,9 @@ object ReelsDetector {
             val resourceId = node.viewIdResourceName?.lowercase().orEmpty()
             val looksLikeClips = (className.isNotEmpty() && CLASS_NAME_KEYWORDS.any { className.contains(it) }) ||
                 (resourceId.isNotEmpty() && RESOURCE_ID_KEYWORDS.any { resourceId.contains(it) })
+            val isFullScreenNode = !hasUsableWindowBounds || isFullScreen(node, windowBounds)
 
-            if (looksLikeClips && (!hasUsableWindowBounds || isFullScreen(node, windowBounds))) {
+            if (looksLikeClips && isFullScreenNode) {
                 if (className.isNotEmpty() && CLASS_NAME_KEYWORDS.any { className.contains(it) }) {
                     matched += "class:$className"
                 }
@@ -100,6 +116,14 @@ object ReelsDetector {
                 }
                 if (contentDesc.contains("like")) hasLikeAction = true
                 if (contentDesc.contains("comment")) hasCommentAction = true
+            }
+
+            if (diagnostics.size < MAX_DIAGNOSTIC_LINES) {
+                val isDiagnosticCandidate = DIAGNOSTIC_KEYWORDS.any { className.contains(it) || resourceId.contains(it) }
+                val isSelectedTabItem = node.isSelected && contentDesc.isNotEmpty()
+                if (isDiagnosticCandidate || isSelectedTabItem) {
+                    diagnostics += describeNode(node, className, resourceId, contentDesc, windowBounds)
+                }
             }
 
             if (depth < MAX_DEPTH) {
@@ -130,7 +154,26 @@ object ReelsDetector {
         val isReels = categoriesMatched >= 2 ||
             (categoriesMatched >= 1 && matched.contains("actions:like_and_comment"))
 
-        return DetectionResult(isReels, matched.toList())
+        return DetectionResult(isReels, matched.toList(), diagnostics)
+    }
+
+    private fun describeNode(
+        node: AccessibilityNodeInfo,
+        className: String,
+        resourceId: String,
+        contentDesc: String,
+        windowBounds: Rect
+    ): String {
+        val bounds = Rect().also { node.getBoundsInScreen(it) }
+        val fullScreen = if (windowBounds.width() > 0 && windowBounds.height() > 0) {
+            isFullScreen(node, windowBounds)
+        } else {
+            false
+        }
+        val shortClassName = className.substringAfterLast('.')
+        val shortDesc = contentDesc.take(40)
+        return "class=$shortClassName id=$resourceId desc=\"$shortDesc\" " +
+            "size=${bounds.width()}x${bounds.height()} fullScreen=$fullScreen selected=${node.isSelected}"
     }
 
     private fun isFullScreen(node: AccessibilityNodeInfo, windowBounds: Rect): Boolean {
