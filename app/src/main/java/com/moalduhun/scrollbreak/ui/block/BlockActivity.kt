@@ -119,13 +119,13 @@ private fun BlockScreen(onGoBack: () -> Unit) {
                     modifier = Modifier
                         .size(96.dp)
                         .scale(scale)
-                        .background(MaterialTheme.colorScheme.error, CircleShape),
+                        .background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Filled.Block,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onError,
+                        tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(48.dp)
                     )
                 }
