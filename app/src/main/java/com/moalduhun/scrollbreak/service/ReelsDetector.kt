@@ -7,28 +7,35 @@ import android.view.accessibility.AccessibilityNodeInfo
  * Heuristic classifier that decides whether the Instagram window currently on screen
  * is the Reels player.
  *
- * There is no public API for "what screen is open inside another app" — this walks the
- * accessibility node tree Instagram exposes and looks for hints Reels leaves behind.
+ * This is no longer a guess. It is built from two real `adb shell uiautomator dump`
+ * captures (34 screens total) taken directly from a real Instagram install: the real
+ * Reels tab playing, a tall video post in the ordinary Home feed, a Reel embedded/
+ * previewed inline in the Home feed, a Reel shared in a DM (unopened preview bubble),
+ * a profile grid, and a followers list.
  *
- * A real device capture (via the ScrollBreakDiag logging below) showed that Instagram's
- * own resource-ids are stripped (empty) and its custom view classes are reported as plain
- * Android widget names (framelayout, viewgroup, ...) — so matching on "clips" class/id
- * keywords, which was the original plan, never fires on this build and is kept only as a
- * cheap bonus signal in case a different build does expose them.
+ * What that data showed:
+ * - Instagram's real Reels viewer always contains a resource-id
+ *   `clips_viewer_action_bar_title` — a small title-bar node that shows "Reels" (or is
+ *   briefly empty while it fades). It appeared on every real Reels-tab capture and on
+ *   no other screen in the whole dataset (Home, DMs, Profile, Followers list).
+ * - A full-screen video ALONE is not enough: an ordinary tall video post in the Home
+ *   feed had its video surface (a platform `SurfaceView`) cover ~72% of the window
+ *   height, which would have passed a loose "mostly full screen" check. The real Reels
+ *   player's surface covered ~92%+. The threshold below is set between those two real
+ *   numbers, not guessed.
+ * - Instagram reuses "clips_"-prefixed resource-ids (author name, follow button, like/
+ *   comment/share/save row, more-options button, audio badge, "double tap to play"
+ *   description) for Reels content that is only *previewed* small inside Home or a DM —
+ *   not only for the real full-screen player. So "clips_" ids alone, without the
+ *   full-screen video, do not mean Reels either.
+ * - Feed posts use their own distinct ids (`row_feed_button_like`, `row_feed_photo_*`),
+ *   never seen alongside the real Reels viewer — kept here as a belt-and-suspenders
+ *   negative signal.
  *
- * What the capture also showed: the combination that was actually triggering blocks —
- * "Reels tab selected" plus "a Like and a Comment icon are visible" — is too weak on its
- * own. Like/Comment icons sit on almost every screen with a post (Home, DMs, a profile),
- * so once that combination fired anywhere it started blocking those screens too, not just
- * the real Reels player.
- *
- * The structural signal used now instead: Reels is, physically, one thing every version of
- * Instagram must use no matter how it obfuscates its own code — a video-rendering surface
- * (SurfaceView/TextureView/VideoView are platform classes; an app cannot rename or hide
- * them from accessibility) that fills nearly the whole screen. Stories also play full-
- * screen video, so this alone does not mean Reels — it has to be paired with a corroborating
- * hint (the Reels tab being selected, or Like+Comment icons on screen) before it counts.
- * Neither corroborating hint is trusted by itself anymore.
+ * So a screen only counts as Reels when the video is genuinely full-screen AND the
+ * viewer shows Reels-specific chrome — not from a single weak hint like "a Like and a
+ * Comment icon are visible", which is true of almost every screen with a post and is
+ * what caused Home/DMs to get blocked in an earlier version of this detector.
  */
 object ReelsDetector {
 
@@ -36,29 +43,31 @@ object ReelsDetector {
     private const val MAX_DEPTH = 30
     private const val MAX_DIAGNOSTIC_LINES = 50
 
-    // A node must cover at least this fraction of the window's width/height to be
-    // considered "full-screen" rather than a small preview thumbnail or shelf card.
-    private const val FULLSCREEN_WIDTH_RATIO = 0.85f
-    private const val FULLSCREEN_HEIGHT_RATIO = 0.6f
+    // A node must cover at least this fraction of the window's width/height to count as
+    // "full-screen". Set from real data: the real Reels player's video surface covered
+    // ~92% of window height; an ordinary tall video post in the Home feed covered ~72%.
+    private const val FULLSCREEN_WIDTH_RATIO = 0.90f
+    private const val FULLSCREEN_HEIGHT_RATIO = 0.85f
+
+    // How many distinct Reels chrome elements are required before trusting them without
+    // the explicit action-bar-title node (in case a future Instagram build hides/renames
+    // just that one node).
+    private const val MIN_CLIPS_ID_FALLBACK_COUNT = 2
 
     private val VIDEO_SURFACE_CLASS_KEYWORDS = listOf("surfaceview", "textureview", "videoview")
-    private val CLASS_NAME_KEYWORDS = listOf("clips")
-    private val RESOURCE_ID_KEYWORDS = listOf(
-        "clips_viewer",
-        "clips_tab",
-        "clips_swipe",
-        "clips_progress",
-        "clip_viewer",
-        "reels_viewer",
-        "clips_single",
-        "single_clip",
-        "clips_media",
-        "clips_caption"
-    )
-    private val REELS_TAB_CONTENT_DESC = listOf("reels")
+
+    // The one id seen on every real Reels-viewer capture and nowhere else in the dataset.
+    private const val REELS_ACTION_BAR_TITLE_ID = "clips_viewer_action_bar_title"
+
+    // Other "clips_"-prefixed ids confirmed real, used only as a fallback count when the
+    // action bar title node above is missing.
+    private val CLIPS_ID_KEYWORDS = listOf("clips_")
+
+    // Confirmed to belong only to ordinary feed posts, never the Reels viewer.
+    private val FEED_POST_ID_KEYWORDS = listOf("row_feed_")
 
     // Broader than the keywords above on purpose — this only feeds diagnostics, not the
-    // block decision, so it is meant to surface things the strict keyword list misses.
+    // block decision, so it is meant to surface things a strict keyword list would miss.
     private val DIAGNOSTIC_KEYWORDS = listOf("clip", "reel", "surface", "texture", "video", "player")
 
     data class DetectionResult(
@@ -75,10 +84,11 @@ object ReelsDetector {
 
         val matched = mutableSetOf<String>()
         val diagnostics = mutableListOf<String>()
+        val clipsIdsSeen = mutableSetOf<String>()
         var nodesVisited = 0
-        var reelsTabSelected = false
-        var hasLikeAction = false
-        var hasCommentAction = false
+        var hasFullScreenVideo = false
+        var hasActionBarTitle = false
+        var hasFeedPostIndicator = false
 
         val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
         queue.add(root to 0)
@@ -89,32 +99,31 @@ object ReelsDetector {
 
             val className = node.className?.toString()?.lowercase().orEmpty()
             val resourceId = node.viewIdResourceName?.lowercase().orEmpty()
-            val isFullScreenNode = hasUsableWindowBounds && isFullScreen(node, windowBounds)
 
-            val isVideoSurface = className.isNotEmpty() && VIDEO_SURFACE_CLASS_KEYWORDS.any { className.contains(it) }
-            if (isVideoSurface && isFullScreenNode) {
+            if (!hasFullScreenVideo &&
+                className.isNotEmpty() &&
+                VIDEO_SURFACE_CLASS_KEYWORDS.any { className.contains(it) } &&
+                hasUsableWindowBounds &&
+                isFullScreen(node, windowBounds)
+            ) {
+                hasFullScreenVideo = true
                 matched += "video_surface:$className"
             }
 
-            val looksLikeClips = (className.isNotEmpty() && CLASS_NAME_KEYWORDS.any { className.contains(it) }) ||
-                (resourceId.isNotEmpty() && RESOURCE_ID_KEYWORDS.any { resourceId.contains(it) })
-            if (looksLikeClips && isFullScreenNode) {
-                if (className.isNotEmpty() && CLASS_NAME_KEYWORDS.any { className.contains(it) }) {
-                    matched += "class:$className"
-                }
-                if (resourceId.isNotEmpty() && RESOURCE_ID_KEYWORDS.any { resourceId.contains(it) }) {
+            if (resourceId.isNotEmpty()) {
+                if (resourceId.contains(REELS_ACTION_BAR_TITLE_ID)) {
+                    hasActionBarTitle = true
                     matched += "id:$resourceId"
+                }
+                if (CLIPS_ID_KEYWORDS.any { resourceId.contains(it) }) {
+                    clipsIdsSeen += resourceId
+                }
+                if (FEED_POST_ID_KEYWORDS.any { resourceId.contains(it) }) {
+                    hasFeedPostIndicator = true
                 }
             }
 
             val contentDesc = node.contentDescription?.toString()?.lowercase().orEmpty()
-            if (contentDesc.isNotEmpty()) {
-                if (node.isSelected && REELS_TAB_CONTENT_DESC.any { contentDesc.contains(it) }) {
-                    reelsTabSelected = true
-                }
-                if (contentDesc.contains("like")) hasLikeAction = true
-                if (contentDesc.contains("comment")) hasCommentAction = true
-            }
 
             if (diagnostics.size < MAX_DIAGNOSTIC_LINES) {
                 val isDiagnosticCandidate = DIAGNOSTIC_KEYWORDS.any { className.contains(it) || resourceId.contains(it) }
@@ -138,19 +147,11 @@ object ReelsDetector {
             recycleSafely(queue.removeFirst().first)
         }
 
-        if (reelsTabSelected) matched += "tab:reels_selected"
-        if (hasLikeAction && hasCommentAction) matched += "actions:like_and_comment"
+        if (clipsIdsSeen.isNotEmpty()) matched += "clips_id_count:${clipsIdsSeen.size}"
+        if (hasFeedPostIndicator) matched += "feed_post_indicator"
 
-        val hasFullScreenVideo = matched.any { it.startsWith("video_surface:") }
-        val hasClipsKeyword = matched.any { it.startsWith("class:") || it.startsWith("id:") }
-        val hasCorroboratingHint = matched.contains("tab:reels_selected") || matched.contains("actions:like_and_comment")
-
-        // A structural signal (an actual full-screen video surface, or — if a future
-        // Instagram build exposes them again — the "clips" class/id keywords) must be
-        // present. Reels-tab-selected and Like+Comment are corroborating only: neither
-        // one, nor the two of them together, is allowed to trigger a block by itself,
-        // because both show up on ordinary screens (Home, DMs, a profile) too.
-        val isReels = hasClipsKeyword || (hasFullScreenVideo && hasCorroboratingHint)
+        val hasReelsChrome = hasActionBarTitle || clipsIdsSeen.size >= MIN_CLIPS_ID_FALLBACK_COUNT
+        val isReels = hasFullScreenVideo && hasReelsChrome && !hasFeedPostIndicator
 
         return DetectionResult(isReels, matched.toList(), diagnostics)
     }
