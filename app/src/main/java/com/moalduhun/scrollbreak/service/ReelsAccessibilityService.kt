@@ -2,6 +2,8 @@ package com.moalduhun.scrollbreak.service
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import com.moalduhun.scrollbreak.data.BlockerRepository
@@ -25,6 +27,7 @@ class ReelsAccessibilityService : AccessibilityService() {
 
     private val job = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.Default + job)
+    private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var repository: BlockerRepository
 
     @Volatile private var blockingEnabled = true
@@ -118,6 +121,7 @@ class ReelsAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        mainHandler.removeCallbacksAndMessages(null)
         job.cancel()
         if (instance === this) instance = null
     }
@@ -128,16 +132,29 @@ class ReelsAccessibilityService : AccessibilityService() {
         private const val CONTENT_CHECK_THROTTLE_MS = 400L
         private const val BLOCK_SUPPRESSION_MS = 1500L
 
+        // How long to wait after BlockActivity finishes before sending the back action.
+        // Sending it immediately can hit BlockActivity's own (already-finishing) window
+        // instead of Instagram's, which is why "go back" sometimes just closed the block
+        // screen without Instagram ever navigating anywhere.
+        private const val BACK_ACTION_DELAY_MS = 300L
+
         @Volatile private var instance: ReelsAccessibilityService? = null
 
         /**
          * Simulates the user pressing the system back button, so leaving a blocked Reels
-         * screen feels the same as if the user had backed out of it themselves — instead of
-         * dropping them out of Instagram entirely, which "go to home screen" used to do.
-         * Only the accessibility service can perform this; [BlockActivity] has no way to
-         * send a global action itself, so it calls through this singleton reference.
+         * screen returns to whatever was open before it — the home feed, a DM thread,
+         * search results, a profile — exactly like the user had backed out of it
+         * themselves. Only the accessibility service can perform this; [BlockActivity] has
+         * no way to send a global action itself, so it calls through this singleton
+         * reference. The action is delayed so it fires after BlockActivity has actually
+         * finished and Instagram has regained window focus, not while our own screen is
+         * still the one in front.
          */
-        fun goBack(): Boolean =
-            instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK) ?: false
+        fun goBack() {
+            val service = instance ?: return
+            service.mainHandler.postDelayed({
+                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            }, BACK_ACTION_DELAY_MS)
+        }
     }
 }
