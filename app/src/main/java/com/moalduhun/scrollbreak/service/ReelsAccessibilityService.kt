@@ -33,6 +33,11 @@ class ReelsAccessibilityService : AccessibilityService() {
     private lateinit var repository: BlockerRepository
 
     @Volatile private var blockingEnabled = true
+    // Per-app coverage the user picks on the Home screen — an app is only checked/blocked
+    // while its flag is on. Kept as plain volatiles updated from the repository flows, the
+    // same way blockingEnabled is, so onAccessibilityEvent can read them without suspending.
+    @Volatile private var coverInstagram = true
+    @Volatile private var coverYouTube = true
     @Volatile private var lastContentCheckMs = 0L
     @Volatile private var suppressUntilMs = 0L
 
@@ -65,6 +70,12 @@ class ReelsAccessibilityService : AccessibilityService() {
         scope.launch {
             repository.isBlockingEnabled.collect { enabled -> blockingEnabled = enabled }
         }
+        scope.launch {
+            repository.coverInstagram.collect { enabled -> coverInstagram = enabled }
+        }
+        scope.launch {
+            repository.coverYouTube.collect { enabled -> coverYouTube = enabled }
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
@@ -77,6 +88,9 @@ class ReelsAccessibilityService : AccessibilityService() {
         if (navigatingHome) return
         val pkg = event.packageName?.toString()
         if (pkg != INSTAGRAM_PACKAGE && pkg != YOUTUBE_PACKAGE) return
+        // Respect the user's per-app choice: skip an app entirely while its coverage is off.
+        if (pkg == INSTAGRAM_PACKAGE && !coverInstagram) return
+        if (pkg == YOUTUBE_PACKAGE && !coverYouTube) return
 
         val now = System.currentTimeMillis()
         if (now < suppressUntilMs) return
