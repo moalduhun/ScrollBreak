@@ -73,7 +73,7 @@ class ReelsAccessibilityService : AccessibilityService() {
     private fun checkForReels(now: Long, event: AccessibilityEvent) {
         val root = rootInActiveWindow ?: return
         val result = try {
-            ReelsDetector.evaluate(root)
+            ReelsDetector.evaluate(root, event.className)
         } catch (t: Throwable) {
             // Never let a malformed node tree crash the accessibility service — that
             // would silently disable blocking until the user re-enables it manually.

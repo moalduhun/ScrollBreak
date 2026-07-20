@@ -17,6 +17,13 @@ import android.view.accessibility.AccessibilityNodeInfo
  * Reels is Instagram/Meta's internal code name "Clips" — matching on "clips" avoids
  * colliding with Stories, whose legacy internal name ("Reel"/"ReelViewerFragment")
  * predates the Reels product and would otherwise cause false positives.
+ *
+ * A Reel opened from a DM launches in its own distinct window,
+ * `com.instagram.modal.TransparentModalActivity` (confirmed from real captures) — a
+ * useful, obfuscation-proof signal since it's a whole Activity class name, not a
+ * renamable id. It isn't trusted alone, though: Instagram likely reuses that same
+ * generic wrapper for other modals/dialogs unrelated to Reels, so it only counts
+ * alongside the existing Like+Comment hint, the same bar the rest of this detector uses.
  */
 object ReelsDetector {
 
@@ -34,6 +41,7 @@ object ReelsDetector {
         "reels_viewer"
     )
     private val REELS_TAB_CONTENT_DESC = listOf("reels")
+    private const val REEL_DM_MODAL_WINDOW_CLASS = "com.instagram.modal.transparentmodalactivity"
 
     // Broader than the keywords above on purpose — this only feeds diagnostics, not the
     // block decision, so it is meant to surface things the strict keyword list misses.
@@ -47,12 +55,14 @@ object ReelsDetector {
         val diagnostics: List<String>
     )
 
-    fun evaluate(root: AccessibilityNodeInfo?): DetectionResult {
+    fun evaluate(root: AccessibilityNodeInfo?, windowClassName: CharSequence? = null): DetectionResult {
         if (root == null) return DetectionResult(false, emptyList(), emptyList())
 
         val windowBounds = Rect().also { root.getBoundsInScreen(it) }
 
         val matched = mutableSetOf<String>()
+        val isReelDmModal = windowClassName?.toString()?.lowercase()?.contains(REEL_DM_MODAL_WINDOW_CLASS) == true
+        if (isReelDmModal) matched += "window:transparent_modal"
         val diagnostics = mutableListOf<String>()
         var nodesVisited = 0
         var reelsTabSelected = false
@@ -128,7 +138,8 @@ object ReelsDetector {
         val categoriesMatched = listOf(
             matched.any { it.startsWith("class:") },
             matched.any { it.startsWith("id:") },
-            matched.contains("tab:reels_selected")
+            matched.contains("tab:reels_selected"),
+            isReelDmModal
         ).count { it }
 
         // Require two agreeing categories, or one plus the weaker like+comment hint
