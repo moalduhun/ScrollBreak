@@ -45,9 +45,11 @@ object ReelsDetector {
 
     // A node must cover at least this fraction of the window's width/height to count as
     // "full-screen". Set from real data: the real Reels player's video surface covered
-    // ~92% of window height; an ordinary tall video post in the Home feed covered ~72%.
-    private const val FULLSCREEN_WIDTH_RATIO = 0.90f
-    private const val FULLSCREEN_HEIGHT_RATIO = 0.85f
+    // ~87-92% of window height; an ordinary tall video post in the Home feed covered
+    // ~67-72%. 80% sits roughly in the middle of that gap so a small difference in how
+    // window bounds are measured on a given device doesn't flip the result either way.
+    private const val FULLSCREEN_WIDTH_RATIO = 0.85f
+    private const val FULLSCREEN_HEIGHT_RATIO = 0.80f
 
     // How many distinct Reels chrome elements are required before trusting them without
     // the explicit action-bar-title node (in case a future Instagram build hides/renames
@@ -83,6 +85,7 @@ object ReelsDetector {
         val hasUsableWindowBounds = windowBounds.width() > 0 && windowBounds.height() > 0
 
         val matched = mutableSetOf<String>()
+        matched += "window:${windowBounds.width()}x${windowBounds.height()}"
         val diagnostics = mutableListOf<String>()
         val clipsIdsSeen = mutableSetOf<String>()
         var nodesVisited = 0
@@ -100,14 +103,14 @@ object ReelsDetector {
             val className = node.className?.toString()?.lowercase().orEmpty()
             val resourceId = node.viewIdResourceName?.lowercase().orEmpty()
 
-            if (!hasFullScreenVideo &&
-                className.isNotEmpty() &&
-                VIDEO_SURFACE_CLASS_KEYWORDS.any { className.contains(it) } &&
-                hasUsableWindowBounds &&
-                isFullScreen(node, windowBounds)
-            ) {
-                hasFullScreenVideo = true
-                matched += "video_surface:$className"
+            if (className.isNotEmpty() && VIDEO_SURFACE_CLASS_KEYWORDS.any { className.contains(it) }) {
+                val nodeBounds = Rect().also { node.getBoundsInScreen(it) }
+                val passesFullScreen = hasUsableWindowBounds && isFullScreen(node, windowBounds)
+                // Logged unconditionally (pass or fail) so a near-miss on a real device
+                // shows up instead of silently doing nothing, the way the fixed 85% cutoff
+                // used to.
+                matched += "video_surface:$className size=${nodeBounds.width()}x${nodeBounds.height()} fullScreen=$passesFullScreen"
+                if (passesFullScreen) hasFullScreenVideo = true
             }
 
             if (resourceId.isNotEmpty()) {
