@@ -43,6 +43,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.moalduhun.scrollbreak.service.ReelsAccessibilityService
 import com.moalduhun.scrollbreak.ui.theme.ScrollBreakTheme
+import kotlinx.coroutines.delay
 
 /**
  * Full-screen takeover launched by [com.moalduhun.scrollbreak.service.ReelsAccessibilityService]
@@ -69,6 +70,8 @@ class BlockActivity : ComponentActivity() {
     }
 }
 
+private const val GO_BACK_COOLDOWN_SECONDS = 3
+
 @Composable
 private fun BlockScreen(onGoBack: () -> Unit) {
     var animateIn by remember { mutableStateOf(false) }
@@ -78,6 +81,17 @@ private fun BlockScreen(onGoBack: () -> Unit) {
         label = "iconScale"
     )
     LaunchedEffect(Unit) { animateIn = true }
+
+    // A brief, visible cooldown before "Go back" can be tapped — mainly so it can't be
+    // hit before the screen (and the accessibility service behind it) has actually
+    // settled, which is what caused the earlier double-click/timing issues.
+    var secondsRemaining by remember { mutableStateOf(GO_BACK_COOLDOWN_SECONDS) }
+    LaunchedEffect(Unit) {
+        while (secondsRemaining > 0) {
+            delay(1_000)
+            secondsRemaining--
+        }
+    }
 
     Scaffold(
         containerColor = Color.Transparent
@@ -141,6 +155,7 @@ private fun BlockScreen(onGoBack: () -> Unit) {
 
                 Button(
                     onClick = onGoBack,
+                    enabled = secondsRemaining <= 0,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(56.dp),
@@ -150,7 +165,11 @@ private fun BlockScreen(onGoBack: () -> Unit) {
                     )
                 ) {
                     Text(
-                        text = "Go back",
+                        text = if (secondsRemaining > 0) {
+                            "You can go back in ${secondsRemaining}s"
+                        } else {
+                            "Go back"
+                        },
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onPrimary
                     )
