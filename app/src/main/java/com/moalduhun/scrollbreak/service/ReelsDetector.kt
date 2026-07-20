@@ -63,6 +63,14 @@ object ReelsDetector {
     private const val REEL_DM_MODAL_WINDOW_CLASS = "com.instagram.modal.transparentmodalactivity"
     private val VIDEO_SURFACE_CLASS_KEYWORDS = listOf("surfaceview", "textureview", "videoview")
 
+    // Real captures show a Reel opened from Explore never exposes a SurfaceView/TextureView
+    // node to accessibility at all (the player surface itself appears to be excluded from
+    // the tree, likely importantForAccessibility="no" — common for ExoPlayer-style views).
+    // Its scrubber does show up though, in both the Explore capture and the Reels-tab one,
+    // always with this exact content-desc — used as a fallback "video is playing" signal
+    // for the same tap/tab-gated Explore branch below, since a photo post has no seekbar.
+    private const val SEEKBAR_CONTENT_DESC = "seekbar"
+
     // The five bottom-tab labels confirmed from real captures (content-description on
     // whichever tab is currently selected).
     private val TAB_LABELS = listOf("home", "search and explore", "reels", "message", "profile")
@@ -72,7 +80,7 @@ object ReelsDetector {
     // block decision, so it is meant to surface things the strict keyword list misses.
     // Kept around for `adb logcat -s ScrollBreakDiag:V` captures used to tune the
     // keywords/thresholds above against a real Instagram install.
-    private val DIAGNOSTIC_KEYWORDS = listOf("clip", "reel", "surface", "texture", "video", "player")
+    private val DIAGNOSTIC_KEYWORDS = listOf("clip", "reel", "surface", "texture", "video", "player", "seekbar")
 
     data class DetectionResult(
         val isReels: Boolean,
@@ -102,6 +110,7 @@ object ReelsDetector {
         var hasLikeAction = false
         var hasCommentAction = false
         var hasFullScreenVideo = false
+        var hasVisibleSeekbar = false
         var detectedTabLabel: String? = null
 
         val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
@@ -139,6 +148,12 @@ object ReelsDetector {
             }
 
             val contentDesc = node.contentDescription?.toString()?.lowercase().orEmpty()
+
+            if (!hasVisibleSeekbar && isVisible && contentDesc == SEEKBAR_CONTENT_DESC) {
+                hasVisibleSeekbar = true
+                matched += "video:seekbar"
+            }
+
             if (contentDesc.isNotEmpty()) {
                 if (node.isSelected && REELS_TAB_CONTENT_DESC.any { contentDesc.contains(it) }) {
                     // Confirmed from a real ScrollBreakDiag capture: Instagram keeps the
@@ -207,8 +222,10 @@ object ReelsDetector {
             (categoriesMatched >= 1 && matched.contains("actions:like_and_comment")) ||
             // Explore/Search paths: neither a grid tap nor "was just on Search" is
             // trusted alone — a normal photo post would satisfy both too — so either
-            // only counts together with a genuine full-screen video surface.
-            (hasFullScreenVideo && (recentContentTap || wasOnExploreTab))
+            // only counts together with a genuine full-screen video surface, or (since
+            // that surface isn't reliably exposed to accessibility on this path — see
+            // SEEKBAR_CONTENT_DESC above) its scrubber actively showing instead.
+            ((hasFullScreenVideo || hasVisibleSeekbar) && (recentContentTap || wasOnExploreTab))
 
         return DetectionResult(isReels, matched.toList(), diagnostics, detectedTabLabel)
     }
