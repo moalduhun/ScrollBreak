@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Scroll Break</string>
+    <string name="accessibility_service_description">Lets ScrollBreak see when the Reels screen opens inside Instagram, so it can block it. It does not read your messages or personal data.</string>
 </resources>
