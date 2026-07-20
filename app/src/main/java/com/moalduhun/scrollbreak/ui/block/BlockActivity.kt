@@ -2,6 +2,7 @@ package com.moalduhun.scrollbreak.ui.block
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.core.EaseOutBack
@@ -74,6 +75,13 @@ private const val GO_BACK_COOLDOWN_SECONDS = 3
 
 @Composable
 private fun BlockScreen(onGoBack: () -> Unit) {
+    // Swallow the Android system back button/gesture entirely so it can't dismiss this
+    // screen and drop the user straight back onto the Reel. Leaving is only allowed via
+    // the app's own "Go back" button below, which routes through goToInstagramHome()
+    // instead of a plain back press. (Home and Recents are intentionally still available —
+    // an accessibility service can't and shouldn't trap those.)
+    BackHandler(enabled = true) { /* intentionally consume, do nothing */ }
+
     var animateIn by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(
         targetValue = if (animateIn) 1f else 0.6f,
