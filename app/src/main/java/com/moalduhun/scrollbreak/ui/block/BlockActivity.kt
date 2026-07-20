@@ -61,8 +61,10 @@ class BlockActivity : ComponentActivity() {
         }
     }
 
+    // Labelled "Go back" in the UI, but it lands specifically on Instagram's own Home
+    // feed rather than doing a plain back press — see goToInstagramHome() for why.
     private fun goBack() {
-        ReelsAccessibilityService.goBack()
+        ReelsAccessibilityService.goToInstagramHome()
         finish()
     }
 }

@@ -2,10 +2,12 @@ package com.moalduhun.scrollbreak.service
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Intent
+import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import com.moalduhun.scrollbreak.data.BlockerRepository
 import com.moalduhun.scrollbreak.ui.block.BlockActivity
 import kotlinx.coroutines.CoroutineScope
@@ -115,6 +117,59 @@ class ReelsAccessibilityService : AccessibilityService() {
         startActivity(intent)
     }
 
+    /**
+     * Taps Instagram's own Home tab icon so leaving a blocked Reel lands specifically on
+     * Instagram's home feed — not the device's home screen, and not a plain back press
+     * (which can land anywhere depending on what was behind the Reel, or do nothing at
+     * all from the Reels tab). The bottom nav's icons don't carry a content-description
+     * in real captures, so the Home tab is identified positionally: it is the left-most
+     * "tab_icon" element that sits in the bottom navigation row.
+     */
+    private fun clickInstagramHomeTab() {
+        val root = rootInActiveWindow
+        val homeTab = root?.let { findHomeTabIcon(it) }
+        if (homeTab != null) {
+            homeTab.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        } else {
+            // Fall back to a plain back press if the bottom nav couldn't be found —
+            // better than doing nothing at all.
+            performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+        }
+    }
+
+    private fun findHomeTabIcon(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val windowBounds = Rect().also { root.getBoundsInScreen(it) }
+        if (windowBounds.height() <= 0) return null
+
+        var best: AccessibilityNodeInfo? = null
+        var bestLeft = Int.MAX_VALUE
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var nodesVisited = 0
+
+        while (queue.isNotEmpty() && nodesVisited < 400) {
+            val node = queue.removeFirst()
+            nodesVisited++
+
+            val resourceId = node.viewIdResourceName?.lowercase().orEmpty()
+            if (resourceId.endsWith("tab_icon")) {
+                val bounds = Rect().also { node.getBoundsInScreen(it) }
+                val relativeTop = (bounds.top - windowBounds.top).toFloat() / windowBounds.height()
+                // Only the bottom navigation row counts — the same resource-id name can
+                // be reused elsewhere on screen (e.g. a header icon).
+                if (relativeTop >= 0.8f && bounds.left < bestLeft) {
+                    bestLeft = bounds.left
+                    best = node
+                }
+            }
+
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+        return best
+    }
+
     override fun onInterrupt() {
         // Required override; nothing to clean up.
     }
@@ -132,29 +187,27 @@ class ReelsAccessibilityService : AccessibilityService() {
         private const val CONTENT_CHECK_THROTTLE_MS = 400L
         private const val BLOCK_SUPPRESSION_MS = 1500L
 
-        // How long to wait after BlockActivity finishes before sending the back action.
-        // Sending it immediately can hit BlockActivity's own (already-finishing) window
-        // instead of Instagram's, which is why "go back" sometimes just closed the block
-        // screen without Instagram ever navigating anywhere.
-        private const val BACK_ACTION_DELAY_MS = 300L
+        // How long to wait after BlockActivity finishes before navigating Instagram.
+        // Sending the action immediately can hit BlockActivity's own (already-finishing)
+        // window instead of Instagram's, which is why this used to sometimes just close
+        // the block screen without Instagram ever navigating anywhere.
+        private const val NAVIGATE_HOME_DELAY_MS = 300L
 
         @Volatile private var instance: ReelsAccessibilityService? = null
 
         /**
-         * Simulates the user pressing the system back button, so leaving a blocked Reels
-         * screen returns to whatever was open before it — the home feed, a DM thread,
-         * search results, a profile — exactly like the user had backed out of it
-         * themselves. Only the accessibility service can perform this; [BlockActivity] has
-         * no way to send a global action itself, so it calls through this singleton
-         * reference. The action is delayed so it fires after BlockActivity has actually
-         * finished and Instagram has regained window focus, not while our own screen is
-         * still the one in front.
+         * Taps Instagram's Home tab so leaving a blocked Reels screen lands on Instagram's
+         * own home feed. Only the accessibility service can do this; [BlockActivity] has
+         * no way to interact with Instagram's window itself, so it calls through this
+         * singleton reference. The action is delayed so it fires after BlockActivity has
+         * actually finished and Instagram has regained window focus, not while our own
+         * screen is still the one in front.
          */
-        fun goBack() {
+        fun goToInstagramHome() {
             val service = instance ?: return
             service.mainHandler.postDelayed({
-                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-            }, BACK_ACTION_DELAY_MS)
+                service.clickInstagramHomeTab()
+            }, NAVIGATE_HOME_DELAY_MS)
         }
     }
 }
