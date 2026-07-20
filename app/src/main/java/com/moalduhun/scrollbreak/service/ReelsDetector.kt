@@ -7,23 +7,36 @@ import android.view.accessibility.AccessibilityNodeInfo
  * Heuristic classifier that decides whether the Instagram window currently on screen
  * is the Reels player.
  *
- * There is no public API for "what screen is open inside another app" — this walks the
- * accessibility node tree Instagram exposes and looks for multiple independent hints at
- * once, instead of trusting a single view id. Instagram changes its internal ids across
- * updates, so any one signal can silently stop matching; requiring two categories to
- * agree makes a single renamed id less likely to break detection outright, and keeping
- * the keyword lists in one place makes it fast to retune after Instagram ships a change.
+ * Every real resource-id used below is confirmed from `adb shell uiautomator dump`
+ * captures of the actual Reels tab, an Explore-opened Reel, and a Reel embedded/
+ * previewed inline in the Home feed and in a DM — not guessed.
  *
- * Reels is Instagram/Meta's internal code name "Clips" — matching on "clips" avoids
- * colliding with Stories, whose legacy internal name ("Reel"/"ReelViewerFragment")
- * predates the Reels product and would otherwise cause false positives.
+ * The big discovery: this app's accessibility service was never granted permission to
+ * read Instagram's element names at all (`viewIdResourceName` came back blank on every
+ * node, live, on this device), even though `uiautomator dump` — a system tool with more
+ * access — showed full names for the exact same screens. That required the
+ * `flagReportViewIds` flag in accessibility_service_config.xml, which was missing. With
+ * it enabled, the ids below are readable for real and this detector can rely on Reels'
+ * actual internal names instead of the earlier fallbacks (Reels-tab-selected, Like+
+ * Comment icons) that were the whole reason Home/DMs sometimes got blocked by mistake.
  *
- * A Reel opened from a DM launches in its own distinct window,
- * `com.instagram.modal.TransparentModalActivity` (confirmed from real captures) — a
- * useful, obfuscation-proof signal since it's a whole Activity class name, not a
- * renamable id. It isn't trusted alone, though: Instagram likely reuses that same
- * generic wrapper for other modals/dialogs unrelated to Reels, so it only counts
- * alongside the existing Like+Comment hint, the same bar the rest of this detector uses.
+ * What the captures showed:
+ * - Every genuine Reels player — reached from the Reels tab, Explore, or a DM — is built
+ *   from the same `clips_video_container`/`clips_viewer_video_layout` chrome and, when
+ *   its own top action bar is visible, a `clips_viewer_action_bar_title` node (showing
+ *   the word "Reels", or briefly empty while it fades).
+ * - Instagram reuses those same "clips_" ids for small Reels *previews* too — a Reel
+ *   embedded in the Home feed, a DM's unopened preview bubble, a profile grid thumbnail.
+ *   Those are never full-screen. So an id match only counts if the matching video
+ *   element actually fills the screen — this is the same full-screen gate this detector
+ *   has needed since the very first version, just now applied to real ids instead of
+ *   guessed ones.
+ * - A Reel opened from a DM launches in its own window,
+ *   `com.instagram.modal.TransparentModalActivity` — kept as an alternate way to confirm
+ *   a full-screen video is really a Reel, for the rare case the action-bar title isn't
+ *   present (e.g. mid-transition, or its own back arrow instead of a title).
+ * - `row_feed_`-prefixed ids belong only to ordinary Home feed posts, confirmed never to
+ *   appear alongside the real Reels viewer — kept as a belt-and-suspenders veto.
  */
 object ReelsDetector {
 
@@ -31,16 +44,18 @@ object ReelsDetector {
     private const val MAX_DEPTH = 30
     private const val MAX_DIAGNOSTIC_LINES = 50
 
-    private val CLASS_NAME_KEYWORDS = listOf("clips")
-    private val RESOURCE_ID_KEYWORDS = listOf(
-        "clips_viewer",
-        "clips_tab",
-        "clips_swipe",
-        "clips_progress",
-        "clip_viewer",
-        "reels_viewer"
-    )
-    private val REELS_TAB_CONTENT_DESC = listOf("reels")
+    // A node must cover at least this fraction of the window's width/height to count as
+    // "full-screen" rather than a small preview/embed. Real numbers: the genuine Reels
+    // player's video area covered 85-93% of window height across every capture; the
+    // tallest confirmed non-Reels case (a tall video post in the ordinary Home feed)
+    // covered ~72%. 78% sits between those with a safety margin on both sides.
+    private const val FULLSCREEN_WIDTH_RATIO = 0.85f
+    private const val FULLSCREEN_HEIGHT_RATIO = 0.78f
+
+    private val VIDEO_SURFACE_CLASS_KEYWORDS = listOf("surfaceview", "textureview", "videoview")
+    private val CLIPS_VIDEO_ID_KEYWORDS = listOf("clips_video_container", "clips_viewer_video_layout")
+    private const val REELS_ACTION_BAR_TITLE_ID = "clips_viewer_action_bar_title"
+    private val FEED_POST_ID_KEYWORDS = listOf("row_feed_")
     private const val REEL_DM_MODAL_WINDOW_CLASS = "com.instagram.modal.transparentmodalactivity"
 
     // Broader than the keywords above on purpose — this only feeds diagnostics, not the
@@ -59,15 +74,18 @@ object ReelsDetector {
         if (root == null) return DetectionResult(false, emptyList(), emptyList())
 
         val windowBounds = Rect().also { root.getBoundsInScreen(it) }
+        val hasUsableWindowBounds = windowBounds.width() > 0 && windowBounds.height() > 0
 
         val matched = mutableSetOf<String>()
-        val isReelDmModal = windowClassName?.toString()?.lowercase()?.contains(REEL_DM_MODAL_WINDOW_CLASS) == true
-        if (isReelDmModal) matched += "window:transparent_modal"
         val diagnostics = mutableListOf<String>()
         var nodesVisited = 0
-        var reelsTabSelected = false
-        var hasLikeAction = false
-        var hasCommentAction = false
+        var hasFullScreenVideo = false
+        var hasActionBarTitle = false
+        var hasFeedPostIndicator = false
+
+        val isReelDmModalWindow = windowClassName?.toString()?.lowercase()
+            ?.contains(REEL_DM_MODAL_WINDOW_CLASS) == true
+        if (isReelDmModalWindow) matched += "window:transparent_modal"
 
         val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
         queue.add(root to 0)
@@ -77,44 +95,37 @@ object ReelsDetector {
             nodesVisited++
 
             // Instagram keeps offscreen pages alive with stale state (confirmed in
-            // practice for the Reels tab, see the isVisibleToUser() check below) so no
-            // signal here is trusted from a node that isn't actually on screen right now.
+            // practice for the Reels tab) so no signal here is trusted from a node that
+            // isn't actually on screen right now.
             val isVisible = node.isVisibleToUser()
 
             val className = node.className?.toString()?.lowercase().orEmpty()
-            if (isVisible && className.isNotEmpty() && CLASS_NAME_KEYWORDS.any { className.contains(it) }) {
-                matched += "class:$className"
+            val resourceId = node.viewIdResourceName?.lowercase().orEmpty()
+
+            if (isVisible && !hasFullScreenVideo && hasUsableWindowBounds) {
+                val looksLikeVideo = (className.isNotEmpty() && VIDEO_SURFACE_CLASS_KEYWORDS.any { className.contains(it) }) ||
+                    (resourceId.isNotEmpty() && CLIPS_VIDEO_ID_KEYWORDS.any { resourceId.contains(it) })
+                if (looksLikeVideo && isFullScreen(node, windowBounds)) {
+                    hasFullScreenVideo = true
+                    matched += "video:$className$resourceId"
+                }
             }
 
-            val resourceId = node.viewIdResourceName?.lowercase().orEmpty()
-            if (isVisible && resourceId.isNotEmpty() && RESOURCE_ID_KEYWORDS.any { resourceId.contains(it) }) {
+            if (isVisible && resourceId.isNotEmpty() && resourceId.contains(REELS_ACTION_BAR_TITLE_ID)) {
+                hasActionBarTitle = true
                 matched += "id:$resourceId"
             }
 
-            val contentDesc = node.contentDescription?.toString()?.lowercase().orEmpty()
-            if (contentDesc.isNotEmpty()) {
-                if (node.isSelected && REELS_TAB_CONTENT_DESC.any { contentDesc.contains(it) }) {
-                    // Confirmed from a real ScrollBreakDiag capture: Instagram keeps the
-                    // Reels tab's "selected" node around after you leave it — hidden, but
-                    // still isSelected=true. Without this visibility check, that stale
-                    // node kept matching on every other screen (Home, DMs, ...) after the
-                    // Reels tab had been opened once. isVisibleToUser() is what tells the
-                    // real, currently-on-screen tab apart from that leftover one.
-                    if (isVisible) {
-                        reelsTabSelected = true
-                    }
-                    diagnostics += "REELS_TAB_NODE: visibleToUser=$isVisible " +
-                        describeNode(node, className, resourceId, contentDesc)
-                }
-                if (contentDesc.contains("like")) hasLikeAction = true
-                if (contentDesc.contains("comment")) hasCommentAction = true
+            if (resourceId.isNotEmpty() && FEED_POST_ID_KEYWORDS.any { resourceId.contains(it) }) {
+                hasFeedPostIndicator = true
             }
+
+            val contentDesc = node.contentDescription?.toString()?.lowercase().orEmpty()
 
             if (diagnostics.size < MAX_DIAGNOSTIC_LINES) {
                 val isDiagnosticCandidate = DIAGNOSTIC_KEYWORDS.any { className.contains(it) || resourceId.contains(it) }
-                val isSelectedTabItem = node.isSelected && contentDesc.isNotEmpty()
-                if (isDiagnosticCandidate || isSelectedTabItem) {
-                    diagnostics += describeNode(node, className, resourceId, contentDesc)
+                if (isDiagnosticCandidate) {
+                    diagnostics += describeNode(node, className, resourceId, contentDesc, windowBounds)
                 }
             }
 
@@ -132,20 +143,10 @@ object ReelsDetector {
             recycleSafely(queue.removeFirst().first)
         }
 
-        if (reelsTabSelected) matched += "tab:reels_selected"
-        if (hasLikeAction && hasCommentAction) matched += "actions:like_and_comment"
+        if (hasFeedPostIndicator) matched += "feed_post_indicator"
 
-        val categoriesMatched = listOf(
-            matched.any { it.startsWith("class:") },
-            matched.any { it.startsWith("id:") },
-            matched.contains("tab:reels_selected"),
-            isReelDmModal
-        ).count { it }
-
-        // Require two agreeing categories, or one plus the weaker like+comment hint
-        // (which alone also appears on a normal feed post, so it can't count by itself).
-        val isReels = categoriesMatched >= 2 ||
-            (categoriesMatched >= 1 && matched.contains("actions:like_and_comment"))
+        val hasReelsChrome = hasActionBarTitle || isReelDmModalWindow
+        val isReels = hasFullScreenVideo && hasReelsChrome && !hasFeedPostIndicator
 
         return DetectionResult(isReels, matched.toList(), diagnostics)
     }
@@ -154,14 +155,22 @@ object ReelsDetector {
         node: AccessibilityNodeInfo,
         className: String,
         resourceId: String,
-        contentDesc: String
+        contentDesc: String,
+        windowBounds: Rect
     ): String {
         val bounds = Rect().also { node.getBoundsInScreen(it) }
+        val fullScreen = windowBounds.width() > 0 && windowBounds.height() > 0 && isFullScreen(node, windowBounds)
         val shortClassName = className.substringAfterLast('.')
         val shortDesc = contentDesc.take(40)
         return "class=$shortClassName id=$resourceId desc=\"$shortDesc\" " +
-            "size=${bounds.width()}x${bounds.height()} selected=${node.isSelected} " +
-            "visible=${node.isVisibleToUser()}"
+            "size=${bounds.width()}x${bounds.height()} fullScreen=$fullScreen visible=${node.isVisibleToUser()}"
+    }
+
+    private fun isFullScreen(node: AccessibilityNodeInfo, windowBounds: Rect): Boolean {
+        val nodeBounds = Rect().also { node.getBoundsInScreen(it) }
+        if (nodeBounds.width() <= 0 || nodeBounds.height() <= 0) return false
+        return nodeBounds.width() >= windowBounds.width() * FULLSCREEN_WIDTH_RATIO &&
+            nodeBounds.height() >= windowBounds.height() * FULLSCREEN_HEIGHT_RATIO
     }
 
     @Suppress("DEPRECATION")
