@@ -36,9 +36,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -107,14 +105,7 @@ private fun BlockScreen(onGoBack: () -> Unit) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            MaterialTheme.colorScheme.error.copy(alpha = 0.16f),
-                            MaterialTheme.colorScheme.background
-                        )
-                    )
-                )
+                .background(MaterialTheme.colorScheme.background)
                 .padding(padding),
             contentAlignment = Alignment.Center
         ) {
@@ -142,18 +133,7 @@ private fun BlockScreen(onGoBack: () -> Unit) {
                 Spacer(Modifier.height(28.dp))
 
                 Text(
-                    text = "Reels blocked",
-                    style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    textAlign = TextAlign.Center
-                )
-
-                Spacer(Modifier.height(12.dp))
-
-                Text(
-                    text = "ScrollBreak stopped Reels before it could pull you in. " +
-                        "DMs, posts, stories and search still work as normal.",
+                    text = "ScrollBreak stopped Reels before it could pull you in.",
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
