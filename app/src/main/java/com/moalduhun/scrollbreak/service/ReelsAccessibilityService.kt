@@ -36,6 +36,12 @@ class ReelsAccessibilityService : AccessibilityService() {
     @Volatile private var lastContentCheckMs = 0L
     @Volatile private var suppressUntilMs = 0L
 
+    // While true, every check is skipped — set the instant "Go back" is pressed and only
+    // cleared once we've actually confirmed the Reels screen is gone, not after a fixed
+    // delay. Without this, a check could fire mid-transition (e.g. between two attempts
+    // at finding the Home tab), still see the Reels player, and immediately re-block.
+    @Volatile private var navigatingHome = false
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
@@ -47,6 +53,7 @@ class ReelsAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         if (!blockingEnabled) return
+        if (navigatingHome) return
         if (event.packageName?.toString() != INSTAGRAM_PACKAGE) return
 
         val now = System.currentTimeMillis()
@@ -159,24 +166,42 @@ class ReelsAccessibilityService : AccessibilityService() {
      * navigation row. Back is now only a last resort, tried once after several attempts
      * to find that icon have failed (e.g. while a Reel is still full-screen and the nav
      * bar isn't in the tree at all) — not the first thing this does.
+     *
+     * Every step here re-checks the detector first: if the Reels player is already gone,
+     * this stops immediately and lets normal checking resume — it does not keep clicking
+     * blindly, and it does not release [navigatingHome] until that is actually true (or a
+     * hard timeout is hit, so a stuck loop can never disable blocking permanently).
      */
     private fun navigateToInstagramHome() {
-        attemptClickHomeTab(HOME_CLICK_MAX_ATTEMPTS)
+        attemptHomeNavigationStep(HOME_CLICK_MAX_ATTEMPTS)
     }
 
-    private fun attemptClickHomeTab(attemptsLeft: Int) {
-        if (attemptsLeft <= 0) {
-            performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-            return
-        }
+    private fun attemptHomeNavigationStep(attemptsLeft: Int) {
         mainHandler.postDelayed({
             val root = rootInActiveWindow
-            val homeTab = root?.let { findHomeTabIcon(it) }
-            if (homeTab != null) {
-                homeTab.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            } else {
-                attemptClickHomeTab(attemptsLeft - 1)
+            val stillOnReels = root != null && try {
+                ReelsDetector.evaluate(root).isReels
+            } catch (t: Throwable) {
+                Log.w(DIAG_TAG, "Detection failed during home navigation", t)
+                false
             }
+
+            if (!stillOnReels) {
+                // Confirmed: the Reels player is gone. Safe to resume normal checking.
+                navigatingHome = false
+                return@postDelayed
+            }
+
+            if (attemptsLeft <= 0) {
+                // Out of attempts — try a plain back press as a last resort, then give up
+                // holding the checks off so blocking can never be stuck disabled.
+                performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                mainHandler.postDelayed({ navigatingHome = false }, HOME_CLICK_RETRY_DELAY_MS)
+                return@postDelayed
+            }
+
+            root?.let { findHomeTabIcon(it) }?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            attemptHomeNavigationStep(attemptsLeft - 1)
         }, HOME_CLICK_RETRY_DELAY_MS)
     }
 
@@ -243,21 +268,33 @@ class ReelsAccessibilityService : AccessibilityService() {
         private const val HOME_CLICK_MAX_ATTEMPTS = 5
         private const val HOME_CLICK_RETRY_DELAY_MS = 200L
 
+        // Absolute cap on how long checks stay paused for, no matter what happens during
+        // navigation — guarantees blocking always comes back even if something unexpected
+        // goes wrong (e.g. the app is backgrounded mid-navigation).
+        private const val NAVIGATE_HOME_TIMEOUT_MS = 6_000L
+
         @Volatile private var instance: ReelsAccessibilityService? = null
 
         /**
          * Taps Instagram's Home tab so leaving a blocked Reels screen lands on Instagram's
          * own home feed. Only the accessibility service can do this; [BlockActivity] has
          * no way to interact with Instagram's window itself, so it calls through this
-         * singleton reference. The action is delayed so it fires after BlockActivity has
-         * actually finished and Instagram has regained window focus, not while our own
-         * screen is still the one in front.
+         * singleton reference.
+         *
+         * Detection is paused ([navigatingHome]) starting the instant this is called, not
+         * just while the click itself is happening — a check firing in between attempts
+         * would still see the Reels player and re-block before navigation finishes. It is
+         * only resumed once the Reels player is confirmed gone, or the timeout below fires.
          */
         fun goToInstagramHome() {
             val service = instance ?: return
+            service.navigatingHome = true
             service.mainHandler.postDelayed({
                 service.navigateToInstagramHome()
             }, NAVIGATE_HOME_DELAY_MS)
+            service.mainHandler.postDelayed({
+                service.navigatingHome = false
+            }, NAVIGATE_HOME_TIMEOUT_MS)
         }
     }
 }
