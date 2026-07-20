@@ -37,6 +37,13 @@ import android.view.accessibility.AccessibilityNodeInfo
  *   (read the same way as the Reels tab's own signal below) even after that tab bar
  *   disappears behind a full-screen video. If it was "search and explore", a
  *   full-screen video appearing afterward is that same tab's Reel.
+ *
+ * A Reel opened from a story's "Watch full reel" link is the hardest case: it plays in
+ * Instagram's main window with no distinct class/id/tab/window signal and the tab still
+ * reading "home". The one thing always present while any full-screen reel plays — and
+ * never on the home feed, a photo post, or a plain story — is the player's own scrubber
+ * (a visible SeekBar). Requiring that seekbar together with the Reels like+comment rail
+ * catches this last case independently of where the Reel was opened from.
  */
 object ReelsDetector {
 
@@ -225,7 +232,17 @@ object ReelsDetector {
             // only counts together with a genuine full-screen video surface, or (since
             // that surface isn't reliably exposed to accessibility on this path — see
             // SEEKBAR_CONTENT_DESC above) its scrubber actively showing instead.
-            ((hasFullScreenVideo || hasVisibleSeekbar) && (recentContentTap || wasOnExploreTab))
+            ((hasFullScreenVideo || hasVisibleSeekbar) && (recentContentTap || wasOnExploreTab)) ||
+            // Story "Watch full reel": tapping that link opens the reel inside
+            // Instagram's main window with no distinct class/id/tab/window signal and
+            // lastKnownTab still "home", so none of the branches above fire (confirmed
+            // from a real ScrollBreakDiag capture). But the full-screen player's own
+            // scrubber (video:seekbar) and the Reels like+comment rail are both present
+            // the whole time. Across every real capture, a visible scrubber has only
+            // ever appeared on the full-screen reel player — never on the home feed, a
+            // photo post, or a plain story — so requiring the seekbar AND like+comment
+            // together is specific to a reel regardless of where it was opened from.
+            (hasVisibleSeekbar && matched.contains("actions:like_and_comment"))
 
         return DetectionResult(isReels, matched.toList(), diagnostics, detectedTabLabel)
     }
