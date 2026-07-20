@@ -66,24 +66,34 @@ object ReelsDetector {
             val (node, depth) = queue.removeFirst()
             nodesVisited++
 
+            // Instagram keeps offscreen pages alive with stale state (confirmed in
+            // practice for the Reels tab, see the isVisibleToUser() check below) so no
+            // signal here is trusted from a node that isn't actually on screen right now.
+            val isVisible = node.isVisibleToUser()
+
             val className = node.className?.toString()?.lowercase().orEmpty()
-            if (className.isNotEmpty() && CLASS_NAME_KEYWORDS.any { className.contains(it) }) {
+            if (isVisible && className.isNotEmpty() && CLASS_NAME_KEYWORDS.any { className.contains(it) }) {
                 matched += "class:$className"
             }
 
             val resourceId = node.viewIdResourceName?.lowercase().orEmpty()
-            if (resourceId.isNotEmpty() && RESOURCE_ID_KEYWORDS.any { resourceId.contains(it) }) {
+            if (isVisible && resourceId.isNotEmpty() && RESOURCE_ID_KEYWORDS.any { resourceId.contains(it) }) {
                 matched += "id:$resourceId"
             }
 
             val contentDesc = node.contentDescription?.toString()?.lowercase().orEmpty()
             if (contentDesc.isNotEmpty()) {
                 if (node.isSelected && REELS_TAB_CONTENT_DESC.any { contentDesc.contains(it) }) {
-                    reelsTabSelected = true
-                    // Testing the theory that Instagram keeps the Reels page alive in the
-                    // background after you leave it, and this node is still being found
-                    // even though it is no longer what's actually on screen.
-                    diagnostics += "REELS_TAB_NODE: visibleToUser=${node.isVisibleToUser()} " +
+                    // Confirmed from a real ScrollBreakDiag capture: Instagram keeps the
+                    // Reels tab's "selected" node around after you leave it — hidden, but
+                    // still isSelected=true. Without this visibility check, that stale
+                    // node kept matching on every other screen (Home, DMs, ...) after the
+                    // Reels tab had been opened once. isVisibleToUser() is what tells the
+                    // real, currently-on-screen tab apart from that leftover one.
+                    if (isVisible) {
+                        reelsTabSelected = true
+                    }
+                    diagnostics += "REELS_TAB_NODE: visibleToUser=$isVisible " +
                         describeNode(node, className, resourceId, contentDesc)
                 }
                 if (contentDesc.contains("like")) hasLikeAction = true
