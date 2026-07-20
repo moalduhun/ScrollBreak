@@ -150,29 +150,25 @@ class ReelsAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Taps Instagram's own Home tab icon so leaving a blocked Reel lands specifically on
-     * Instagram's home feed — not the device's home screen, and not a plain back press.
+     * Leaves a blocked Reel and lands back in Instagram, checks paused the whole time
+     * ([navigatingHome]) so a check firing mid-transition can't see a stale Reels screen
+     * and re-block before this finishes.
      *
-     * This used to look for a resource-id named "tab_icon", but real captures from this
-     * exact device show Instagram's element names are stripped to blank — so that lookup
-     * silently failed on every single call, always falling through to a plain back press.
-     * That explains two different symptoms: the button being unreliable (back doesn't
-     * reliably land on Home — it can land on whatever was on the back stack, or do
-     * nothing from the Reels tab), and it occasionally exiting the app outright (pressing
-     * back from a screen with nothing behind it closes Instagram instead of navigating).
+     * Tries a plain back press first: a Reel opened from Home, a DM, Search, or a
+     * profile has a real destination behind it, so back alone naturally returns to
+     * exactly that screen — faster and more correct than forcing everything to Home.
+     * Only if a check afterwards confirms Reels is still showing (e.g. this was the
+     * Reels tab itself, which can have nothing to back into) does this fall back to
+     * finding and tapping Instagram's own Home tab icon.
      *
-     * With no id and no content-description to rely on, the Home tab is now found purely
-     * by position and behaviour: the left-most *clickable* element sitting in the bottom
-     * navigation row. Back is now only a last resort, tried once after several attempts
-     * to find that icon have failed (e.g. while a Reel is still full-screen and the nav
-     * bar isn't in the tree at all) — not the first thing this does.
-     *
-     * Every step here re-checks the detector first: if the Reels player is already gone,
-     * this stops immediately and lets normal checking resume — it does not keep clicking
-     * blindly, and it does not release [navigatingHome] until that is actually true (or a
-     * hard timeout is hit, so a stuck loop can never disable blocking permanently).
+     * That Home tab lookup used to search for a resource-id named "tab_icon", but real
+     * captures from this exact device show Instagram's element names come through
+     * blank — so it silently failed every time. With no id or content-description to
+     * rely on, it's found by position and behaviour instead: the left-most *clickable*
+     * element sitting in the bottom navigation row.
      */
     private fun navigateToInstagramHome() {
+        performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
         attemptHomeNavigationStep(HOME_CLICK_MAX_ATTEMPTS, alreadyClicked = false)
     }
 
