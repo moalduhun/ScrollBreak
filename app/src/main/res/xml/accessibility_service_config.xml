@@ -1,9 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  TEMPORARY DIAGNOSTIC WIDENING: eventTypes and packageNames were opened up to catch
+  everything system-wide (not just Instagram's window-state/content-changed/click
+  events) to debug why Explore detection wasn't firing. See
+  ReelsAccessibilityService.logRawEventIfDiagnostic(). Narrow this back to Instagram-only
+  once Explore detection is confirmed working, since a system-wide listener processes
+  every app's events and burns more battery than this app needs long-term.
+-->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeViewClicked"
+    android:accessibilityEventTypes="typeAllMask"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="true"
     android:description="@string/accessibility_service_description"
-    android:notificationTimeout="100"
-    android:packageNames="com.instagram.android" />
+    android:notificationTimeout="0" />

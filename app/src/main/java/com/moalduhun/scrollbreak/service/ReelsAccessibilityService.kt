@@ -63,6 +63,11 @@ class ReelsAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
+        // TEMPORARY: logs every event on the whole phone, regardless of package, to find
+        // out why Explore detection isn't firing — see accessibility_service_config.xml.
+        // Everything below this line is unchanged and still Instagram-only.
+        logRawEvent(event)
+
         if (!blockingEnabled) return
         if (navigatingHome) return
         if (event.packageName?.toString() != INSTAGRAM_PACKAGE) return
@@ -80,6 +85,22 @@ class ReelsAccessibilityService : AccessibilityService() {
             }
             AccessibilityEvent.TYPE_VIEW_CLICKED -> recordContentTap(event)
         }
+    }
+
+    /**
+     * Raw, unfiltered dump of every accessibility event on the device — package, event
+     * type, source class, text, content-description. Use `adb logcat -s
+     * ScrollBreakDiag:V | grep RAW` to follow just this while reproducing the Explore
+     * issue; the rest of ScrollBreakDiag's usual Instagram-only logging still interleaves
+     * with it in the same stream.
+     */
+    private fun logRawEvent(event: AccessibilityEvent) {
+        val pkg = event.packageName ?: "?"
+        val eventName = AccessibilityEvent.eventTypeToString(event.eventType)
+        val sourceClass = event.className ?: "?"
+        val text = event.text?.joinToString(separator = "|").orEmpty().take(60)
+        val desc = event.contentDescription?.toString().orEmpty().take(60)
+        Log.d(DIAG_TAG, "RAW pkg=$pkg event=$eventName class=$sourceClass text=\"$text\" desc=\"$desc\"")
     }
 
     /**
