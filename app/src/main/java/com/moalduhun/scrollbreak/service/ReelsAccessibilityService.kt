@@ -173,10 +173,16 @@ class ReelsAccessibilityService : AccessibilityService() {
      * hard timeout is hit, so a stuck loop can never disable blocking permanently).
      */
     private fun navigateToInstagramHome() {
-        attemptHomeNavigationStep(HOME_CLICK_MAX_ATTEMPTS)
+        attemptHomeNavigationStep(HOME_CLICK_MAX_ATTEMPTS, alreadyClicked = false)
     }
 
-    private fun attemptHomeNavigationStep(attemptsLeft: Int) {
+    /**
+     * [alreadyClicked] stops this from tapping the Home icon again on every retry once one
+     * click has actually landed — Instagram just hadn't finished reacting to it yet on the
+     * next check. Without this, a slow transition looked like the click failed and got
+     * re-sent, landing as an unwanted double-tap on the Home tab.
+     */
+    private fun attemptHomeNavigationStep(attemptsLeft: Int, alreadyClicked: Boolean) {
         mainHandler.postDelayed({
             val root = rootInActiveWindow
             val stillOnReels = root != null && try {
@@ -200,8 +206,12 @@ class ReelsAccessibilityService : AccessibilityService() {
                 return@postDelayed
             }
 
-            root?.let { findHomeTabIcon(it) }?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            attemptHomeNavigationStep(attemptsLeft - 1)
+            val didClickThisStep = if (!alreadyClicked) {
+                root?.let { findHomeTabIcon(it) }?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
+            } else {
+                true
+            }
+            attemptHomeNavigationStep(attemptsLeft - 1, alreadyClicked = didClickThisStep)
         }, HOME_CLICK_RETRY_DELAY_MS)
     }
 
