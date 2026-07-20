@@ -94,7 +94,15 @@ class ReelsAccessibilityService : AccessibilityService() {
     private fun logDiagnostics(event: AccessibilityEvent, result: ReelsDetector.DetectionResult) {
         val eventName = AccessibilityEvent.eventTypeToString(event.eventType)
         val windowClass = event.className ?: "unknown"
-        Log.d(DIAG_TAG, "--- check event=$eventName windowClass=$windowClass isReels=${result.isReels} ---")
+        Log.d(
+            DIAG_TAG,
+            "--- check event=$eventName windowClass=$windowClass eventWindowId=${event.windowId} " +
+                "rootWindowId=${rootInActiveWindow?.windowId} isReels=${result.isReels} ---"
+        )
+        // Testing whether Instagram is keeping more than one window/page alive at once —
+        // if a stale Reels window is still listed here after leaving it, that would
+        // explain the detector still seeing "Reels" content behind the current screen.
+        logActiveWindows()
         if (result.matchedSignals.isNotEmpty()) {
             Log.d(DIAG_TAG, "matched=${result.matchedSignals}")
         }
@@ -102,6 +110,23 @@ class ReelsAccessibilityService : AccessibilityService() {
             Log.d(DIAG_TAG, "no clips/reel-flavoured nodes on this screen")
         } else {
             result.diagnostics.forEach { Log.d(DIAG_TAG, it) }
+        }
+    }
+
+    private fun logActiveWindows() {
+        val activeWindows = try {
+            windows
+        } catch (t: Throwable) {
+            Log.w(DIAG_TAG, "Could not read windows()", t)
+            return
+        }
+        Log.d(DIAG_TAG, "windows(${activeWindows.size}):")
+        for (window in activeWindows) {
+            Log.d(
+                DIAG_TAG,
+                "  id=${window.id} title=${window.title} type=${window.type} " +
+                    "active=${window.isActive} focused=${window.isFocused}"
+            )
         }
     }
 

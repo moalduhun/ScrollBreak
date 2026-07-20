@@ -80,6 +80,11 @@ object ReelsDetector {
             if (contentDesc.isNotEmpty()) {
                 if (node.isSelected && REELS_TAB_CONTENT_DESC.any { contentDesc.contains(it) }) {
                     reelsTabSelected = true
+                    // Testing the theory that Instagram keeps the Reels page alive in the
+                    // background after you leave it, and this node is still being found
+                    // even though it is no longer what's actually on screen.
+                    diagnostics += "REELS_TAB_NODE: visibleToUser=${node.isVisibleToUser()} " +
+                        describeNode(node, className, resourceId, contentDesc)
                 }
                 if (contentDesc.contains("like")) hasLikeAction = true
                 if (contentDesc.contains("comment")) hasCommentAction = true
@@ -134,7 +139,8 @@ object ReelsDetector {
         val shortClassName = className.substringAfterLast('.')
         val shortDesc = contentDesc.take(40)
         return "class=$shortClassName id=$resourceId desc=\"$shortDesc\" " +
-            "size=${bounds.width()}x${bounds.height()} selected=${node.isSelected}"
+            "size=${bounds.width()}x${bounds.height()} selected=${node.isSelected} " +
+            "visible=${node.isVisibleToUser()}"
     }
 
     @Suppress("DEPRECATION")
