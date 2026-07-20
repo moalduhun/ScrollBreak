@@ -37,6 +37,17 @@ import android.view.accessibility.AccessibilityNodeInfo
  *   present (e.g. mid-transition, or its own back arrow instead of a title).
  * - `row_feed_`-prefixed ids belong only to ordinary Home feed posts, confirmed never to
  *   appear alongside the real Reels viewer — kept as a belt-and-suspenders veto.
+ *
+ * In practice, `flagReportViewIds` has not reliably taken effect on the test device —
+ * ids come back readable sometimes and blank other times even after re-toggling the
+ * permission, which is outside this app's control. Relying on the action-bar-title id
+ * alone regressed the Reels tab and a Home-opened Reel to never blocking, while DMs kept
+ * working because that path only needs the *window* class name (never gated by the
+ * flag). So the pre-id fallbacks — the Reels tab's own "selected" state, and a Like icon
+ * together with a Comment icon (both read from content-description, also never gated by
+ * the flag) — are back as an alternate way to satisfy the Reels-chrome requirement below.
+ * They are still only trusted alongside an actual full-screen video, same as the id
+ * path — that full-screen gate is what stopped them from over-blocking Home before.
  */
 object ReelsDetector {
 
@@ -57,6 +68,7 @@ object ReelsDetector {
     private const val REELS_ACTION_BAR_TITLE_ID = "clips_viewer_action_bar_title"
     private val FEED_POST_ID_KEYWORDS = listOf("row_feed_")
     private const val REEL_DM_MODAL_WINDOW_CLASS = "com.instagram.modal.transparentmodalactivity"
+    private val REELS_TAB_CONTENT_DESC = listOf("reels")
 
     // Broader than the keywords above on purpose — this only feeds diagnostics, not the
     // block decision, so it is meant to surface things the strict keyword list misses.
@@ -82,6 +94,9 @@ object ReelsDetector {
         var hasFullScreenVideo = false
         var hasActionBarTitle = false
         var hasFeedPostIndicator = false
+        var reelsTabSelected = false
+        var hasLikeAction = false
+        var hasCommentAction = false
 
         val isReelDmModalWindow = windowClassName?.toString()?.lowercase()
             ?.contains(REEL_DM_MODAL_WINDOW_CLASS) == true
@@ -121,6 +136,18 @@ object ReelsDetector {
             }
 
             val contentDesc = node.contentDescription?.toString()?.lowercase().orEmpty()
+            if (contentDesc.isNotEmpty()) {
+                // Neither of these needs flagReportViewIds — content-description is
+                // always readable — so they still work when the id-based signals above
+                // don't. Same staleness caveat as the id check: Instagram keeps the
+                // Reels tab's "selected" node around after leaving it, hidden, so this
+                // only counts when the node is genuinely visible right now.
+                if (isVisible && node.isSelected && REELS_TAB_CONTENT_DESC.any { contentDesc.contains(it) }) {
+                    reelsTabSelected = true
+                }
+                if (contentDesc.contains("like")) hasLikeAction = true
+                if (contentDesc.contains("comment")) hasCommentAction = true
+            }
 
             if (diagnostics.size < MAX_DIAGNOSTIC_LINES) {
                 val isDiagnosticCandidate = DIAGNOSTIC_KEYWORDS.any { className.contains(it) || resourceId.contains(it) }
@@ -144,8 +171,14 @@ object ReelsDetector {
         }
 
         if (hasFeedPostIndicator) matched += "feed_post_indicator"
+        if (reelsTabSelected) matched += "tab:reels_selected"
+        if (hasLikeAction && hasCommentAction) matched += "actions:like_and_comment"
 
-        val hasReelsChrome = hasActionBarTitle || isReelDmModalWindow
+        // The id-based signal is preferred when it's available, but ids have not
+        // reliably come through on the test device even with flagReportViewIds granted
+        // — so the pre-id fallbacks stay as a genuine alternate path, not just a note.
+        val hasReelsChrome = hasActionBarTitle || isReelDmModalWindow || reelsTabSelected ||
+            (hasLikeAction && hasCommentAction)
         val isReels = hasFullScreenVideo && hasReelsChrome && !hasFeedPostIndicator
 
         return DetectionResult(isReels, matched.toList(), diagnostics)
