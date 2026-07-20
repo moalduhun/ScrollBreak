@@ -144,22 +144,40 @@ class ReelsAccessibilityService : AccessibilityService() {
 
     /**
      * Taps Instagram's own Home tab icon so leaving a blocked Reel lands specifically on
-     * Instagram's home feed — not the device's home screen, and not a plain back press
-     * (which can land anywhere depending on what was behind the Reel, or do nothing at
-     * all from the Reels tab). The bottom nav's icons don't carry a content-description
-     * in real captures, so the Home tab is identified positionally: it is the left-most
-     * "tab_icon" element that sits in the bottom navigation row.
+     * Instagram's home feed — not the device's home screen, and not a plain back press.
+     *
+     * This used to look for a resource-id named "tab_icon", but real captures from this
+     * exact device show Instagram's element names are stripped to blank — so that lookup
+     * silently failed on every single call, always falling through to a plain back press.
+     * That explains two different symptoms: the button being unreliable (back doesn't
+     * reliably land on Home — it can land on whatever was on the back stack, or do
+     * nothing from the Reels tab), and it occasionally exiting the app outright (pressing
+     * back from a screen with nothing behind it closes Instagram instead of navigating).
+     *
+     * With no id and no content-description to rely on, the Home tab is now found purely
+     * by position and behaviour: the left-most *clickable* element sitting in the bottom
+     * navigation row. Back is now only a last resort, tried once after several attempts
+     * to find that icon have failed (e.g. while a Reel is still full-screen and the nav
+     * bar isn't in the tree at all) — not the first thing this does.
      */
-    private fun clickInstagramHomeTab() {
-        val root = rootInActiveWindow
-        val homeTab = root?.let { findHomeTabIcon(it) }
-        if (homeTab != null) {
-            homeTab.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        } else {
-            // Fall back to a plain back press if the bottom nav couldn't be found —
-            // better than doing nothing at all.
+    private fun navigateToInstagramHome() {
+        attemptClickHomeTab(HOME_CLICK_MAX_ATTEMPTS)
+    }
+
+    private fun attemptClickHomeTab(attemptsLeft: Int) {
+        if (attemptsLeft <= 0) {
             performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            return
         }
+        mainHandler.postDelayed({
+            val root = rootInActiveWindow
+            val homeTab = root?.let { findHomeTabIcon(it) }
+            if (homeTab != null) {
+                homeTab.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            } else {
+                attemptClickHomeTab(attemptsLeft - 1)
+            }
+        }, HOME_CLICK_RETRY_DELAY_MS)
     }
 
     private fun findHomeTabIcon(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
@@ -176,13 +194,14 @@ class ReelsAccessibilityService : AccessibilityService() {
             val node = queue.removeFirst()
             nodesVisited++
 
-            val resourceId = node.viewIdResourceName?.lowercase().orEmpty()
-            if (resourceId.endsWith("tab_icon")) {
+            if (node.isClickable && node.isVisibleToUser) {
                 val bounds = Rect().also { node.getBoundsInScreen(it) }
                 val relativeTop = (bounds.top - windowBounds.top).toFloat() / windowBounds.height()
-                // Only the bottom navigation row counts — the same resource-id name can
-                // be reused elsewhere on screen (e.g. a header icon).
-                if (relativeTop >= 0.8f && bounds.left < bestLeft) {
+                val isIconSized = bounds.width() in 1..250 && bounds.height() in 1..250
+                // Only a small, clickable element sitting in the bottom navigation row
+                // counts — this rules out the row's own container (also clickable, but
+                // spans the full row) and anything higher up the screen.
+                if (relativeTop >= 0.8f && isIconSized && bounds.left < bestLeft) {
                     bestLeft = bounds.left
                     best = node
                 }
@@ -218,6 +237,12 @@ class ReelsAccessibilityService : AccessibilityService() {
         // the block screen without Instagram ever navigating anywhere.
         private const val NAVIGATE_HOME_DELAY_MS = 300L
 
+        // How many times to retry finding the Home tab icon, and how long to wait between
+        // attempts, while the app finishes transitioning out of the full-screen player
+        // (during which the bottom nav isn't in the accessibility tree yet).
+        private const val HOME_CLICK_MAX_ATTEMPTS = 5
+        private const val HOME_CLICK_RETRY_DELAY_MS = 200L
+
         @Volatile private var instance: ReelsAccessibilityService? = null
 
         /**
@@ -231,7 +256,7 @@ class ReelsAccessibilityService : AccessibilityService() {
         fun goToInstagramHome() {
             val service = instance ?: return
             service.mainHandler.postDelayed({
-                service.clickInstagramHomeTab()
+                service.navigateToInstagramHome()
             }, NAVIGATE_HOME_DELAY_MS)
         }
     }
