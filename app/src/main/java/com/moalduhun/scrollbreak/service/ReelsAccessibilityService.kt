@@ -41,6 +41,12 @@ class ReelsAccessibilityService : AccessibilityService() {
     // Explore case — see ReelsDetector's recentContentTap parameter.
     @Volatile private var lastContentTapMs = 0L
 
+    // Remembers which bottom tab (home/search and explore/reels/message/profile) was
+    // last visibly selected, even after that tab bar disappears behind a full-screen
+    // video — which is exactly when it's needed. Read from ReelsDetector.evaluate's
+    // own result and fed back into the next call, since the detector itself is stateless.
+    @Volatile private var lastKnownTab: String? = null
+
     // While true, every check is skipped — set the instant "Go back" is pressed and only
     // cleared once we've actually confirmed the Reels screen is gone, not after a fixed
     // delay. Without this, a check could fire mid-transition (e.g. between two attempts
@@ -99,12 +105,16 @@ class ReelsAccessibilityService : AccessibilityService() {
         val root = rootInActiveWindow ?: return
         val recentContentTap = now - lastContentTapMs < CONTENT_TAP_WINDOW_MS
         val result = try {
-            ReelsDetector.evaluate(root, event.className, recentContentTap)
+            ReelsDetector.evaluate(root, event.className, recentContentTap, lastKnownTab)
         } catch (t: Throwable) {
             // Never let a malformed node tree crash the accessibility service — that
             // would silently disable blocking until the user re-enables it manually.
             Log.w(DIAG_TAG, "Detection failed", t)
             return
+        }
+
+        if (result.detectedTabLabel != null) {
+            lastKnownTab = result.detectedTabLabel
         }
 
         logDiagnostics(event, result)
@@ -130,7 +140,7 @@ class ReelsAccessibilityService : AccessibilityService() {
         Log.d(
             DIAG_TAG,
             "--- check event=$eventName windowClass=$windowClass eventWindowId=${event.windowId} " +
-                "rootWindowId=${rootInActiveWindow?.windowId} isReels=${result.isReels} ---"
+                "rootWindowId=${rootInActiveWindow?.windowId} lastKnownTab=$lastKnownTab isReels=${result.isReels} ---"
         )
         // Testing whether Instagram is keeping more than one window/page alive at once —
         // if a stale Reels window is still listed here after leaving it, that would

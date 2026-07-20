@@ -26,12 +26,17 @@ import android.view.accessibility.AccessibilityNodeInfo
  * alongside the existing Like+Comment hint, the same bar the rest of this detector uses.
  *
  * A Reel opened from Explore/Search doesn't reliably raise any of the signals above (no
- * distinct window, no reliably-selected tab). Instead of touching the working paths
- * above, this adds one independent extra path just for that case: [recentContentTap]
- * (set by the service when the user's last tap landed on the content grid, not the
- * search bar or the bottom nav) combined with an actual full-screen video surface. A
- * grid tap alone would also fire for a normal photo post, so it is never trusted by
- * itself — only together with a real full-screen video is it treated as Reels.
+ * distinct window, and its own tab bar disappears once a Reel goes full-screen so it
+ * can't be read at the moment that matters). Instead of touching the working paths
+ * above, this adds two independent extra paths just for that case, both only trusted
+ * together with an actual full-screen video surface — never alone, since a normal photo
+ * post would also satisfy them:
+ * - [recentContentTap]: the service's last tap landed on the content grid, not the
+ *   search bar or the bottom nav.
+ * - [lastKnownTab]: the service remembers which bottom tab was last visibly selected
+ *   (read the same way as the Reels tab's own signal below) even after that tab bar
+ *   disappears behind a full-screen video. If it was "search and explore", a
+ *   full-screen video appearing afterward is that same tab's Reel.
  */
 object ReelsDetector {
 
@@ -58,6 +63,11 @@ object ReelsDetector {
     private const val REEL_DM_MODAL_WINDOW_CLASS = "com.instagram.modal.transparentmodalactivity"
     private val VIDEO_SURFACE_CLASS_KEYWORDS = listOf("surfaceview", "textureview", "videoview")
 
+    // The five bottom-tab labels confirmed from real captures (content-description on
+    // whichever tab is currently selected).
+    private val TAB_LABELS = listOf("home", "search and explore", "reels", "message", "profile")
+    private const val EXPLORE_TAB_LABEL = "search and explore"
+
     // Broader than the keywords above on purpose — this only feeds diagnostics, not the
     // block decision, so it is meant to surface things the strict keyword list misses.
     // Kept around for `adb logcat -s ScrollBreakDiag:V` captures used to tune the
@@ -67,13 +77,15 @@ object ReelsDetector {
     data class DetectionResult(
         val isReels: Boolean,
         val matchedSignals: List<String>,
-        val diagnostics: List<String>
+        val diagnostics: List<String>,
+        val detectedTabLabel: String? = null
     )
 
     fun evaluate(
         root: AccessibilityNodeInfo?,
         windowClassName: CharSequence? = null,
-        recentContentTap: Boolean = false
+        recentContentTap: Boolean = false,
+        lastKnownTab: String? = null
     ): DetectionResult {
         if (root == null) return DetectionResult(false, emptyList(), emptyList())
 
@@ -90,6 +102,7 @@ object ReelsDetector {
         var hasLikeAction = false
         var hasCommentAction = false
         var hasFullScreenVideo = false
+        var detectedTabLabel: String? = null
 
         val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
         queue.add(root to 0)
@@ -108,7 +121,7 @@ object ReelsDetector {
                 matched += "class:$className"
             }
 
-            if (recentContentTap && !hasFullScreenVideo && isVisible && hasUsableWindowBounds &&
+            if (!hasFullScreenVideo && isVisible && hasUsableWindowBounds &&
                 className.isNotEmpty() && VIDEO_SURFACE_CLASS_KEYWORDS.any { className.contains(it) }
             ) {
                 val nodeBounds = Rect().also { node.getBoundsInScreen(it) }
@@ -142,6 +155,15 @@ object ReelsDetector {
                 }
                 if (contentDesc.contains("like")) hasLikeAction = true
                 if (contentDesc.contains("comment")) hasCommentAction = true
+
+                // Same idea as the Reels-tab check above, generalised to all five tabs:
+                // remember whichever one is currently, visibly selected. The service
+                // keeps this even after the tab bar disappears behind a full-screen
+                // video, so it still knows "the user was just on Search" at the moment
+                // that matters.
+                if (isVisible && node.isSelected && detectedTabLabel == null) {
+                    detectedTabLabel = TAB_LABELS.firstOrNull { contentDesc == it || contentDesc.contains(it) }
+                }
             }
 
             if (diagnostics.size < MAX_DIAGNOSTIC_LINES) {
@@ -176,17 +198,19 @@ object ReelsDetector {
             isReelDmModal
         ).count { it }
 
+        val wasOnExploreTab = lastKnownTab == EXPLORE_TAB_LABEL
+        if (wasOnExploreTab) matched += "last_tab:search_and_explore"
+
         // Require two agreeing categories, or one plus the weaker like+comment hint
         // (which alone also appears on a normal feed post, so it can't count by itself).
         val isReels = categoriesMatched >= 2 ||
             (categoriesMatched >= 1 && matched.contains("actions:like_and_comment")) ||
-            // Explore/Search path: the user's last tap was on the content grid (not
-            // search or the nav bar) and it opened an actual full-screen video. A grid
-            // tap alone isn't trusted — a normal photo post would also satisfy it — so
-            // this only fires together with a genuine full-screen video surface.
-            (recentContentTap && hasFullScreenVideo)
+            // Explore/Search paths: neither a grid tap nor "was just on Search" is
+            // trusted alone — a normal photo post would satisfy both too — so either
+            // only counts together with a genuine full-screen video surface.
+            (hasFullScreenVideo && (recentContentTap || wasOnExploreTab))
 
-        return DetectionResult(isReels, matched.toList(), diagnostics)
+        return DetectionResult(isReels, matched.toList(), diagnostics, detectedTabLabel)
     }
 
     private fun describeNode(
