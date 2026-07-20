@@ -36,6 +36,11 @@ class ReelsAccessibilityService : AccessibilityService() {
     @Volatile private var lastContentCheckMs = 0L
     @Volatile private var suppressUntilMs = 0L
 
+    // Set whenever the user's last tap landed on Explore/Search's content grid (not the
+    // search bar or the bottom nav). Used only as one extra, opt-in signal for the
+    // Explore case — see ReelsDetector's recentContentTap parameter.
+    @Volatile private var lastContentTapMs = 0L
+
     // While true, every check is skipped — set the instant "Go back" is pressed and only
     // cleared once we've actually confirmed the Reels screen is gone, not after a fixed
     // delay. Without this, a check could fire mid-transition (e.g. between two attempts
@@ -67,13 +72,34 @@ class ReelsAccessibilityService : AccessibilityService() {
                     checkForReels(now, event)
                 }
             }
+            AccessibilityEvent.TYPE_VIEW_CLICKED -> recordContentTap(event)
+        }
+    }
+
+    /**
+     * Explore/Search never raises a reliable window/tab signal when a Reel is opened
+     * from it, so this uses where the user actually tapped as an extra clue instead: a
+     * tap on the content grid (not the search bar up top, not the bottom nav) is a
+     * reasonable sign something is about to open. It isn't trusted alone — a tap also
+     * opens ordinary photo posts — [ReelsDetector] only uses it together with an actual
+     * full-screen video appearing afterward.
+     */
+    private fun recordContentTap(event: AccessibilityEvent) {
+        val source = event.source ?: return
+        val windowBounds = Rect().also { rootInActiveWindow?.getBoundsInScreen(it) }
+        if (windowBounds.height() <= 0) return
+        val tapBounds = Rect().also { source.getBoundsInScreen(it) }
+        val relativeY = (tapBounds.centerY() - windowBounds.top).toFloat() / windowBounds.height()
+        if (relativeY in CONTENT_ZONE_TOP..CONTENT_ZONE_BOTTOM) {
+            lastContentTapMs = System.currentTimeMillis()
         }
     }
 
     private fun checkForReels(now: Long, event: AccessibilityEvent) {
         val root = rootInActiveWindow ?: return
+        val recentContentTap = now - lastContentTapMs < CONTENT_TAP_WINDOW_MS
         val result = try {
-            ReelsDetector.evaluate(root, event.className)
+            ReelsDetector.evaluate(root, event.className, recentContentTap)
         } catch (t: Throwable) {
             // Never let a malformed node tree crash the accessibility service — that
             // would silently disable blocking until the user re-enables it manually.
@@ -259,6 +285,17 @@ class ReelsAccessibilityService : AccessibilityService() {
     companion object {
         private const val DIAG_TAG = "ScrollBreakDiag"
         private const val INSTAGRAM_PACKAGE = "com.instagram.android"
+
+        // A tap counts as "on the content grid" only in this vertical band — above it is
+        // the search bar/header/category tabs, below it is the bottom nav row. Matches
+        // the real search bar position confirmed from a capture (relative top ~17-22%)
+        // and the bottom nav row (relative top ~94-97%), with margin on both sides.
+        private const val CONTENT_ZONE_TOP = 0.28f
+        private const val CONTENT_ZONE_BOTTOM = 0.90f
+
+        // How long a content-grid tap stays "recent" enough to count toward Explore
+        // detection — long enough to cover the tap-to-full-screen transition.
+        private const val CONTENT_TAP_WINDOW_MS = 2_500L
 
         // Kept low so a Reel is caught the moment it starts rendering rather than up to
         // 400ms later — a real screen switch (TYPE_WINDOW_STATE_CHANGED) is already

@@ -24,12 +24,26 @@ import android.view.accessibility.AccessibilityNodeInfo
  * renamable id. It isn't trusted alone, though: Instagram likely reuses that same
  * generic wrapper for other modals/dialogs unrelated to Reels, so it only counts
  * alongside the existing Like+Comment hint, the same bar the rest of this detector uses.
+ *
+ * A Reel opened from Explore/Search doesn't reliably raise any of the signals above (no
+ * distinct window, no reliably-selected tab). Instead of touching the working paths
+ * above, this adds one independent extra path just for that case: [recentContentTap]
+ * (set by the service when the user's last tap landed on the content grid, not the
+ * search bar or the bottom nav) combined with an actual full-screen video surface. A
+ * grid tap alone would also fire for a normal photo post, so it is never trusted by
+ * itself — only together with a real full-screen video is it treated as Reels.
  */
 object ReelsDetector {
 
     private const val MAX_NODES = 600
     private const val MAX_DEPTH = 30
     private const val MAX_DIAGNOSTIC_LINES = 50
+
+    // A node must cover at least this fraction of the window's width/height to count as
+    // "full-screen" — only used for the tap-triggered Explore path below, so it can't
+    // affect the class/id/tab/window signals the other paths already rely on.
+    private const val FULLSCREEN_WIDTH_RATIO = 0.85f
+    private const val FULLSCREEN_HEIGHT_RATIO = 0.78f
 
     private val CLASS_NAME_KEYWORDS = listOf("clips")
     private val RESOURCE_ID_KEYWORDS = listOf(
@@ -42,6 +56,7 @@ object ReelsDetector {
     )
     private val REELS_TAB_CONTENT_DESC = listOf("reels")
     private const val REEL_DM_MODAL_WINDOW_CLASS = "com.instagram.modal.transparentmodalactivity"
+    private val VIDEO_SURFACE_CLASS_KEYWORDS = listOf("surfaceview", "textureview", "videoview")
 
     // Broader than the keywords above on purpose — this only feeds diagnostics, not the
     // block decision, so it is meant to surface things the strict keyword list misses.
@@ -55,19 +70,26 @@ object ReelsDetector {
         val diagnostics: List<String>
     )
 
-    fun evaluate(root: AccessibilityNodeInfo?, windowClassName: CharSequence? = null): DetectionResult {
+    fun evaluate(
+        root: AccessibilityNodeInfo?,
+        windowClassName: CharSequence? = null,
+        recentContentTap: Boolean = false
+    ): DetectionResult {
         if (root == null) return DetectionResult(false, emptyList(), emptyList())
 
         val windowBounds = Rect().also { root.getBoundsInScreen(it) }
+        val hasUsableWindowBounds = windowBounds.width() > 0 && windowBounds.height() > 0
 
         val matched = mutableSetOf<String>()
         val isReelDmModal = windowClassName?.toString()?.lowercase()?.contains(REEL_DM_MODAL_WINDOW_CLASS) == true
         if (isReelDmModal) matched += "window:transparent_modal"
+        if (recentContentTap) matched += "tap:content_grid"
         val diagnostics = mutableListOf<String>()
         var nodesVisited = 0
         var reelsTabSelected = false
         var hasLikeAction = false
         var hasCommentAction = false
+        var hasFullScreenVideo = false
 
         val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
         queue.add(root to 0)
@@ -84,6 +106,18 @@ object ReelsDetector {
             val className = node.className?.toString()?.lowercase().orEmpty()
             if (isVisible && className.isNotEmpty() && CLASS_NAME_KEYWORDS.any { className.contains(it) }) {
                 matched += "class:$className"
+            }
+
+            if (recentContentTap && !hasFullScreenVideo && isVisible && hasUsableWindowBounds &&
+                className.isNotEmpty() && VIDEO_SURFACE_CLASS_KEYWORDS.any { className.contains(it) }
+            ) {
+                val nodeBounds = Rect().also { node.getBoundsInScreen(it) }
+                val isFullScreen = nodeBounds.width() >= windowBounds.width() * FULLSCREEN_WIDTH_RATIO &&
+                    nodeBounds.height() >= windowBounds.height() * FULLSCREEN_HEIGHT_RATIO
+                if (isFullScreen) {
+                    hasFullScreenVideo = true
+                    matched += "video:$className"
+                }
             }
 
             val resourceId = node.viewIdResourceName?.lowercase().orEmpty()
@@ -145,7 +179,12 @@ object ReelsDetector {
         // Require two agreeing categories, or one plus the weaker like+comment hint
         // (which alone also appears on a normal feed post, so it can't count by itself).
         val isReels = categoriesMatched >= 2 ||
-            (categoriesMatched >= 1 && matched.contains("actions:like_and_comment"))
+            (categoriesMatched >= 1 && matched.contains("actions:like_and_comment")) ||
+            // Explore/Search path: the user's last tap was on the content grid (not
+            // search or the nav bar) and it opened an actual full-screen video. A grid
+            // tap alone isn't trusted — a normal photo post would also satisfy it — so
+            // this only fires together with a genuine full-screen video surface.
+            (recentContentTap && hasFullScreenVideo)
 
         return DetectionResult(isReels, matched.toList(), diagnostics)
     }
