@@ -1,5 +1,6 @@
 package com.moalduhun.scrollbreak.service
 
+import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
 
 /**
@@ -23,12 +24,24 @@ import android.view.accessibility.AccessibilityNodeInfo
  * component for all of them, it just arrives with a different back stack underneath it.
  * The one signal that does depend on entry point is the "Reels tab selected" hint, which
  * is only present for tab entry — everywhere else has to rely on class name + resource id
- * agreeing, which is why both are kept broad enough to match the single-reel viewer too.
+ * agreeing.
+ *
+ * Instagram also reuses the "clips" widget classes and id prefixes for small Reels
+ * *previews* — the recommendation shelf on the Home feed, grid thumbnails on Search and
+ * on a profile's Reels tab. Matching on keywords alone caught those too and blocked
+ * screens that were not actually playing a Reel. A class/id hit only counts now if the
+ * matching node fills nearly the whole screen, which is true for the immersive player but
+ * not for a shelf card or a grid thumbnail.
  */
 object ReelsDetector {
 
     private const val MAX_NODES = 600
     private const val MAX_DEPTH = 30
+
+    // A node must cover at least this fraction of the window's width/height to be
+    // considered "full-screen" rather than a small preview thumbnail or shelf card.
+    private const val FULLSCREEN_WIDTH_RATIO = 0.85f
+    private const val FULLSCREEN_HEIGHT_RATIO = 0.6f
 
     private val CLASS_NAME_KEYWORDS = listOf("clips")
     private val RESOURCE_ID_KEYWORDS = listOf(
@@ -50,6 +63,9 @@ object ReelsDetector {
     fun evaluate(root: AccessibilityNodeInfo?): DetectionResult {
         if (root == null) return DetectionResult(false, emptyList())
 
+        val windowBounds = Rect().also { root.getBoundsInScreen(it) }
+        val hasUsableWindowBounds = windowBounds.width() > 0 && windowBounds.height() > 0
+
         val matched = mutableSetOf<String>()
         var nodesVisited = 0
         var reelsTabSelected = false
@@ -64,13 +80,17 @@ object ReelsDetector {
             nodesVisited++
 
             val className = node.className?.toString()?.lowercase().orEmpty()
-            if (className.isNotEmpty() && CLASS_NAME_KEYWORDS.any { className.contains(it) }) {
-                matched += "class:$className"
-            }
-
             val resourceId = node.viewIdResourceName?.lowercase().orEmpty()
-            if (resourceId.isNotEmpty() && RESOURCE_ID_KEYWORDS.any { resourceId.contains(it) }) {
-                matched += "id:$resourceId"
+            val looksLikeClips = (className.isNotEmpty() && CLASS_NAME_KEYWORDS.any { className.contains(it) }) ||
+                (resourceId.isNotEmpty() && RESOURCE_ID_KEYWORDS.any { resourceId.contains(it) })
+
+            if (looksLikeClips && (!hasUsableWindowBounds || isFullScreen(node, windowBounds))) {
+                if (className.isNotEmpty() && CLASS_NAME_KEYWORDS.any { className.contains(it) }) {
+                    matched += "class:$className"
+                }
+                if (resourceId.isNotEmpty() && RESOURCE_ID_KEYWORDS.any { resourceId.contains(it) }) {
+                    matched += "id:$resourceId"
+                }
             }
 
             val contentDesc = node.contentDescription?.toString()?.lowercase().orEmpty()
@@ -111,6 +131,13 @@ object ReelsDetector {
             (categoriesMatched >= 1 && matched.contains("actions:like_and_comment"))
 
         return DetectionResult(isReels, matched.toList())
+    }
+
+    private fun isFullScreen(node: AccessibilityNodeInfo, windowBounds: Rect): Boolean {
+        val nodeBounds = Rect().also { node.getBoundsInScreen(it) }
+        if (nodeBounds.width() <= 0 || nodeBounds.height() <= 0) return false
+        return nodeBounds.width() >= windowBounds.width() * FULLSCREEN_WIDTH_RATIO &&
+            nodeBounds.height() >= windowBounds.height() * FULLSCREEN_HEIGHT_RATIO
     }
 
     @Suppress("DEPRECATION")
