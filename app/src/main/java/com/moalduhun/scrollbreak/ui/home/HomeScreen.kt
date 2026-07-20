@@ -44,9 +44,9 @@ import com.moalduhun.scrollbreak.ui.theme.ScrollBreakTheme
 private data class HowItWorksItem(val text: String)
 
 private val HOW_IT_WORKS = listOf(
-    HowItWorksItem("Watches for the Reels screen while Instagram is open"),
-    HowItWorksItem("Blocks it the moment it appears, before it can hook you"),
-    HowItWorksItem("DMs, posts, stories and search keep working normally")
+    HowItWorksItem("Watches for Instagram Reels and YouTube Shorts"),
+    HowItWorksItem("Blocks them the moment they appear, before they hook you"),
+    HowItWorksItem("DMs, posts, stories, search and normal videos keep working")
 )
 
 @Composable
@@ -93,7 +93,7 @@ fun HomeScreen(
                         color = MaterialTheme.colorScheme.onBackground
                     )
                     Text(
-                        text = "Instagram Reels blocker",
+                        text = "Reels & Shorts blocker",
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -182,9 +182,9 @@ private fun StatusCard(isEnabled: Boolean, onToggle: (Boolean) -> Unit) {
                 )
                 Text(
                     text = if (isEnabled) {
-                        "Reels will be blocked as soon as it opens"
+                        "Reels and Shorts will be blocked as soon as they open"
                     } else {
-                        "Instagram Reels will not be blocked right now"
+                        "Reels and Shorts will not be blocked right now"
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant

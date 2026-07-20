@@ -53,6 +53,11 @@ class ReelsAccessibilityService : AccessibilityService() {
     // at finding the Home tab), still see the Reels player, and immediately re-block.
     @Volatile private var navigatingHome = false
 
+    // Which app's short-form content triggered the most recent block. The "Go back" flow
+    // reads this to leave the right way: Instagram gets the Home-tab navigation below,
+    // YouTube just gets repeated back presses until the Short is gone.
+    @Volatile private var blockedPackage: String = INSTAGRAM_PACKAGE
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
@@ -70,20 +75,22 @@ class ReelsAccessibilityService : AccessibilityService() {
 
         if (!blockingEnabled) return
         if (navigatingHome) return
-        if (event.packageName?.toString() != INSTAGRAM_PACKAGE) return
+        val pkg = event.packageName?.toString()
+        if (pkg != INSTAGRAM_PACKAGE && pkg != YOUTUBE_PACKAGE) return
 
         val now = System.currentTimeMillis()
         if (now < suppressUntilMs) return
 
         when (event.eventType) {
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> checkForReels(now, event)
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> checkForShortForm(now, event, pkg)
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
                 if (now - lastContentCheckMs >= CONTENT_CHECK_THROTTLE_MS) {
                     lastContentCheckMs = now
-                    checkForReels(now, event)
+                    checkForShortForm(now, event, pkg)
                 }
             }
-            AccessibilityEvent.TYPE_VIEW_CLICKED -> recordContentTap(event)
+            // A content-grid tap is only a signal for Instagram's Explore path.
+            AccessibilityEvent.TYPE_VIEW_CLICKED -> if (pkg == INSTAGRAM_PACKAGE) recordContentTap(event)
         }
     }
 
@@ -122,29 +129,66 @@ class ReelsAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun checkForReels(now: Long, event: AccessibilityEvent) {
+    /**
+     * Runs the right detector for whichever app the event came from — [ReelsDetector] for
+     * Instagram, [YouTubeShortsDetector] for YouTube — and blocks if it fires. The two paths
+     * are kept fully separate so YouTube support can't affect the confirmed-working
+     * Instagram detection.
+     */
+    private fun checkForShortForm(now: Long, event: AccessibilityEvent, pkg: String) {
         val root = rootInActiveWindow ?: return
-        val recentContentTap = now - lastContentTapMs < CONTENT_TAP_WINDOW_MS
-        val result = try {
-            ReelsDetector.evaluate(root, event.className, recentContentTap, lastKnownTab)
-        } catch (t: Throwable) {
-            // Never let a malformed node tree crash the accessibility service — that
-            // would silently disable blocking until the user re-enables it manually.
-            Log.w(DIAG_TAG, "Detection failed", t)
-            return
+
+        val isBlocked: Boolean
+        val signals: List<String>
+
+        if (pkg == YOUTUBE_PACKAGE) {
+            val result = try {
+                YouTubeShortsDetector.evaluate(root)
+            } catch (t: Throwable) {
+                Log.w(DIAG_TAG, "YouTube detection failed", t)
+                return
+            }
+            logYouTubeDiagnostics(event, result)
+            isBlocked = result.isShorts
+            signals = result.matchedSignals
+        } else {
+            val recentContentTap = now - lastContentTapMs < CONTENT_TAP_WINDOW_MS
+            val result = try {
+                ReelsDetector.evaluate(root, event.className, recentContentTap, lastKnownTab)
+            } catch (t: Throwable) {
+                // Never let a malformed node tree crash the accessibility service — that
+                // would silently disable blocking until the user re-enables it manually.
+                Log.w(DIAG_TAG, "Detection failed", t)
+                return
+            }
+            if (result.detectedTabLabel != null) {
+                lastKnownTab = result.detectedTabLabel
+            }
+            logDiagnostics(event, result)
+            isBlocked = result.isReels
+            signals = result.matchedSignals
         }
 
-        if (result.detectedTabLabel != null) {
-            lastKnownTab = result.detectedTabLabel
-        }
-
-        logDiagnostics(event, result)
-
-        if (result.isReels) {
-            Log.d(DIAG_TAG, ">>> BLOCKING, signals=${result.matchedSignals}")
+        if (isBlocked) {
+            Log.d(DIAG_TAG, ">>> BLOCKING pkg=$pkg signals=$signals")
+            blockedPackage = pkg
             suppressUntilMs = now + BLOCK_SUPPRESSION_MS
             launchBlockScreen()
             scope.launch { repository.recordBlock() }
+        }
+    }
+
+    private fun logYouTubeDiagnostics(event: AccessibilityEvent, result: YouTubeShortsDetector.DetectionResult) {
+        val eventName = AccessibilityEvent.eventTypeToString(event.eventType)
+        val windowClass = event.className ?: "unknown"
+        Log.d(DIAG_TAG, "--- YT check event=$eventName windowClass=$windowClass isShorts=${result.isShorts} ---")
+        if (result.matchedSignals.isNotEmpty()) {
+            Log.d(DIAG_TAG, "YT matched=${result.matchedSignals}")
+        }
+        if (result.diagnostics.isEmpty()) {
+            Log.d(DIAG_TAG, "no shorts/reel-flavoured nodes on this YouTube screen")
+        } else {
+            result.diagnostics.forEach { Log.d(DIAG_TAG, "YT $it") }
         }
     }
 
@@ -227,6 +271,44 @@ class ReelsAccessibilityService : AccessibilityService() {
     private fun navigateToInstagramHome() {
         performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
         attemptHomeNavigationStep(HOME_CLICK_MAX_ATTEMPTS, alreadyClicked = false)
+    }
+
+    /**
+     * Leaving a blocked YouTube Short is simpler than Instagram: a Short always has a real
+     * destination behind it (the Shorts feed, Home, Subscriptions, wherever it was opened
+     * from), so a plain back press exits it. This just presses back and, if a check still
+     * sees the Shorts player, presses again — no icon hunting needed. Checks stay paused
+     * ([navigatingHome]) the whole time so a mid-transition check can't re-block.
+     */
+    private fun navigateAwayFromYouTubeShorts() {
+        performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+        attemptLeaveYouTubeShortsStep(HOME_CLICK_MAX_ATTEMPTS)
+    }
+
+    private fun attemptLeaveYouTubeShortsStep(attemptsLeft: Int) {
+        mainHandler.postDelayed({
+            val root = rootInActiveWindow
+            val stillOnShorts = root != null && try {
+                YouTubeShortsDetector.evaluate(root).isShorts
+            } catch (t: Throwable) {
+                Log.w(DIAG_TAG, "YouTube detection failed during leave", t)
+                false
+            }
+
+            if (!stillOnShorts) {
+                navigatingHome = false
+                return@postDelayed
+            }
+
+            if (attemptsLeft <= 0) {
+                // Out of attempts — resume checks so blocking can never get stuck disabled.
+                navigatingHome = false
+                return@postDelayed
+            }
+
+            performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            attemptLeaveYouTubeShortsStep(attemptsLeft - 1)
+        }, HOME_CLICK_RETRY_DELAY_MS)
     }
 
     /**
@@ -316,6 +398,7 @@ class ReelsAccessibilityService : AccessibilityService() {
     companion object {
         private const val DIAG_TAG = "ScrollBreakDiag"
         private const val INSTAGRAM_PACKAGE = "com.instagram.android"
+        private const val YOUTUBE_PACKAGE = "com.google.android.youtube"
 
         // A tap counts as "on the content grid" only in this vertical band — above it is
         // the search bar/header/category tabs, below it is the bottom nav row. Matches
@@ -356,21 +439,25 @@ class ReelsAccessibilityService : AccessibilityService() {
         @Volatile private var instance: ReelsAccessibilityService? = null
 
         /**
-         * Taps Instagram's Home tab so leaving a blocked Reels screen lands on Instagram's
-         * own home feed. Only the accessibility service can do this; [BlockActivity] has
-         * no way to interact with Instagram's window itself, so it calls through this
-         * singleton reference.
+         * Leaves whichever blocked short-form screen is showing and returns to normal use —
+         * Instagram's own Home feed for a Reel, a plain back-out for a YouTube Short. Only
+         * the accessibility service can drive the other app's window; [BlockActivity] has no
+         * way to do it itself, so it calls through this singleton reference.
          *
          * Detection is paused ([navigatingHome]) starting the instant this is called, not
-         * just while the click itself is happening — a check firing in between attempts
-         * would still see the Reels player and re-block before navigation finishes. It is
-         * only resumed once the Reels player is confirmed gone, or the timeout below fires.
+         * just while the action itself is happening — a check firing in between attempts
+         * would still see the player and re-block before navigation finishes. It is only
+         * resumed once the player is confirmed gone, or the timeout below fires.
          */
-        fun goToInstagramHome() {
+        fun leaveBlockedApp() {
             val service = instance ?: return
             service.navigatingHome = true
             service.mainHandler.postDelayed({
-                service.navigateToInstagramHome()
+                if (service.blockedPackage == YOUTUBE_PACKAGE) {
+                    service.navigateAwayFromYouTubeShorts()
+                } else {
+                    service.navigateToInstagramHome()
+                }
             }, NAVIGATE_HOME_DELAY_MS)
             service.mainHandler.postDelayed({
                 service.navigatingHome = false

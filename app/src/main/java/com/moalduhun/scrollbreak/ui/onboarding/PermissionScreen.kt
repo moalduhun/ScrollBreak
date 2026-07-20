@@ -44,7 +44,7 @@ import com.moalduhun.scrollbreak.ui.theme.ScrollBreakTheme
 private data class Reassurance(val text: String)
 
 private val REASSURANCES = listOf(
-    Reassurance("Only looks for the Reels screen inside Instagram"),
+    Reassurance("Only looks for Instagram Reels and YouTube Shorts"),
     Reassurance("Never reads your chats, DMs or personal data"),
     Reassurance("Everything runs on your phone, nothing is uploaded")
 )
@@ -95,8 +95,8 @@ fun PermissionScreen(onOpenSettings: () -> Unit) {
             Spacer(Modifier.height(12.dp))
 
             Text(
-                text = "ScrollBreak needs this permission to see when the Reels " +
-                    "screen opens inside Instagram, so it can block it right away.",
+                text = "ScrollBreak needs this permission to see when Instagram Reels " +
+                    "or YouTube Shorts open, so it can block them right away.",
                 style = MaterialTheme.typography.bodyLarge,
                 textAlign = TextAlign.Center,
                 color = MaterialTheme.colorScheme.onSurfaceVariant

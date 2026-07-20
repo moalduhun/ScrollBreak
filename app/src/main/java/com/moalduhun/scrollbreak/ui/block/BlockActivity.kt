@@ -61,10 +61,11 @@ class BlockActivity : ComponentActivity() {
         }
     }
 
-    // Labelled "Go back" in the UI, but it lands specifically on Instagram's own Home
-    // feed rather than doing a plain back press — see goToInstagramHome() for why.
+    // Labelled "Go back" in the UI. It leaves whichever short-form screen was blocked the
+    // right way for that app (Instagram's Home feed, or a back-out of a YouTube Short) —
+    // see ReelsAccessibilityService.leaveBlockedApp() for why it's not a plain back press.
     private fun goBack() {
-        ReelsAccessibilityService.goToInstagramHome()
+        ReelsAccessibilityService.leaveBlockedApp()
         finish()
     }
 }
@@ -75,7 +76,7 @@ private const val GO_BACK_COOLDOWN_SECONDS = 3
 private fun BlockScreen(onGoBack: () -> Unit) {
     // Swallow the Android system back button/gesture entirely so it can't dismiss this
     // screen and drop the user straight back onto the Reel. Leaving is only allowed via
-    // the app's own "Go back" button below, which routes through goToInstagramHome()
+    // the app's own "Go back" button below, which routes through leaveBlockedApp()
     // instead of a plain back press. (Home and Recents are intentionally still available —
     // an accessibility service can't and shouldn't trap those.)
     BackHandler(enabled = true) { /* intentionally consume, do nothing */ }
