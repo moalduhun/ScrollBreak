@@ -33,6 +33,7 @@ class ReelsAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        instance = this
         repository = BlockerRepository(applicationContext)
         scope.launch {
             repository.isBlockingEnabled.collect { enabled -> blockingEnabled = enabled }
@@ -95,12 +96,25 @@ class ReelsAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         super.onDestroy()
         job.cancel()
+        if (instance === this) instance = null
     }
 
-    private companion object {
-        const val TAG = "ReelsAccessibility"
-        const val INSTAGRAM_PACKAGE = "com.instagram.android"
-        const val CONTENT_CHECK_THROTTLE_MS = 400L
-        const val BLOCK_SUPPRESSION_MS = 1500L
+    companion object {
+        private const val TAG = "ReelsAccessibility"
+        private const val INSTAGRAM_PACKAGE = "com.instagram.android"
+        private const val CONTENT_CHECK_THROTTLE_MS = 400L
+        private const val BLOCK_SUPPRESSION_MS = 1500L
+
+        @Volatile private var instance: ReelsAccessibilityService? = null
+
+        /**
+         * Simulates the user pressing the system back button, so leaving a blocked Reels
+         * screen feels the same as if the user had backed out of it themselves — instead of
+         * dropping them out of Instagram entirely, which "go to home screen" used to do.
+         * Only the accessibility service can perform this; [BlockActivity] has no way to
+         * send a global action itself, so it calls through this singleton reference.
+         */
+        fun goBack(): Boolean =
+            instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK) ?: false
     }
 }

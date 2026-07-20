@@ -16,6 +16,14 @@ import android.view.accessibility.AccessibilityNodeInfo
  * Reels is Instagram/Meta's internal code name "Clips" — matching on "clips" avoids
  * colliding with Stories, whose legacy internal name ("Reel"/"ReelViewerFragment")
  * predates the Reels product and would otherwise cause false positives.
+ *
+ * This only looks at what is currently on screen, never how the user got there — so a
+ * Reel opened from a DM share, a Search/Explore result, or someone's profile grid is
+ * caught the same way as one opened from the Reels tab: Instagram reuses the same player
+ * component for all of them, it just arrives with a different back stack underneath it.
+ * The one signal that does depend on entry point is the "Reels tab selected" hint, which
+ * is only present for tab entry — everywhere else has to rely on class name + resource id
+ * agreeing, which is why both are kept broad enough to match the single-reel viewer too.
  */
 object ReelsDetector {
 
@@ -29,7 +37,11 @@ object ReelsDetector {
         "clips_swipe",
         "clips_progress",
         "clip_viewer",
-        "reels_viewer"
+        "reels_viewer",
+        "clips_single",
+        "single_clip",
+        "clips_media",
+        "clips_caption"
     )
     private val REELS_TAB_CONTENT_DESC = listOf("reels")
 

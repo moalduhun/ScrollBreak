@@ -1,6 +1,5 @@
 package com.moalduhun.scrollbreak.ui.block
 
-import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -27,7 +26,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -43,6 +41,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.moalduhun.scrollbreak.service.ReelsAccessibilityService
 import com.moalduhun.scrollbreak.ui.theme.ScrollBreakTheme
 
 /**
@@ -57,26 +56,19 @@ class BlockActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             ScrollBreakTheme {
-                BlockScreen(
-                    onGoHome = { goHome() },
-                    onDismiss = { finish() }
-                )
+                BlockScreen(onGoBack = { goBack() })
             }
         }
     }
 
-    private fun goHome() {
-        val homeIntent = Intent(Intent.ACTION_MAIN).apply {
-            addCategory(Intent.CATEGORY_HOME)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        startActivity(homeIntent)
+    private fun goBack() {
+        ReelsAccessibilityService.goBack()
         finish()
     }
 }
 
 @Composable
-private fun BlockScreen(onGoHome: () -> Unit, onDismiss: () -> Unit) {
+private fun BlockScreen(onGoBack: () -> Unit) {
     var animateIn by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(
         targetValue = if (animateIn) 1f else 0.6f,
@@ -146,7 +138,7 @@ private fun BlockScreen(onGoHome: () -> Unit, onDismiss: () -> Unit) {
                 Spacer(Modifier.height(40.dp))
 
                 Button(
-                    onClick = onGoHome,
+                    onClick = onGoBack,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(56.dp),
@@ -156,18 +148,9 @@ private fun BlockScreen(onGoHome: () -> Unit, onDismiss: () -> Unit) {
                     )
                 ) {
                     Text(
-                        text = "Go to home screen",
+                        text = "Go back",
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onPrimary
-                    )
-                }
-
-                Spacer(Modifier.height(8.dp))
-
-                TextButton(onClick = onDismiss) {
-                    Text(
-                        text = "Not now",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
@@ -179,6 +162,6 @@ private fun BlockScreen(onGoHome: () -> Unit, onDismiss: () -> Unit) {
 @Composable
 private fun BlockScreenPreview() {
     ScrollBreakTheme {
-        BlockScreen(onGoHome = {}, onDismiss = {})
+        BlockScreen(onGoBack = {})
     }
 }
