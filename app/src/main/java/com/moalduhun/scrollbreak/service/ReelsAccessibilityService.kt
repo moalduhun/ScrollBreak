@@ -253,20 +253,26 @@ class ReelsAccessibilityService : AccessibilityService() {
     companion object {
         private const val DIAG_TAG = "ScrollBreakDiag"
         private const val INSTAGRAM_PACKAGE = "com.instagram.android"
-        private const val CONTENT_CHECK_THROTTLE_MS = 400L
+
+        // Kept low so a Reel is caught the moment it starts rendering rather than up to
+        // 400ms later — a real screen switch (TYPE_WINDOW_STATE_CHANGED) is already
+        // checked with no throttle at all; this only limits how often content-changed
+        // events (which fire constantly while scrolling a normal feed) get re-checked.
+        private const val CONTENT_CHECK_THROTTLE_MS = 120L
         private const val BLOCK_SUPPRESSION_MS = 1500L
 
         // How long to wait after BlockActivity finishes before navigating Instagram.
         // Sending the action immediately can hit BlockActivity's own (already-finishing)
         // window instead of Instagram's, which is why this used to sometimes just close
-        // the block screen without Instagram ever navigating anywhere.
-        private const val NAVIGATE_HOME_DELAY_MS = 300L
+        // the block screen without Instagram ever navigating anywhere. Kept as short as
+        // that race allows.
+        private const val NAVIGATE_HOME_DELAY_MS = 120L
 
         // How many times to retry finding the Home tab icon, and how long to wait between
         // attempts, while the app finishes transitioning out of the full-screen player
         // (during which the bottom nav isn't in the accessibility tree yet).
-        private const val HOME_CLICK_MAX_ATTEMPTS = 5
-        private const val HOME_CLICK_RETRY_DELAY_MS = 200L
+        private const val HOME_CLICK_MAX_ATTEMPTS = 6
+        private const val HOME_CLICK_RETRY_DELAY_MS = 100L
 
         // Absolute cap on how long checks stay paused for, no matter what happens during
         // navigation — guarantees blocking always comes back even if something unexpected
