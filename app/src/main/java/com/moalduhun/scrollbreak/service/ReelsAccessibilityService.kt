@@ -5,6 +5,7 @@ import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import com.moalduhun.scrollbreak.data.BlockerRepository
 import kotlinx.coroutines.CoroutineScope
@@ -210,17 +211,39 @@ class ReelsAccessibilityService : AccessibilityService() {
     /**
      * Takes the overlay down and unmutes. [performBack] presses Back so the app leaves the
      * reel/short and returns to the previous screen — used for the "Go back" button, but not
-     * when the overlay is being cleared because the user already left the app. A short
-     * suppression window stops the reel that's still momentarily on screen mid-transition
-     * from instantly re-triggering the block.
+     * when the overlay is being cleared because the user already left the app.
+     *
+     * The Back press is delayed a moment: the overlay is a focusable window, so pressing Back
+     * the instant it's removed raced the app regaining input focus and the press went nowhere
+     * (this is why "Go back" wasn't working). Waiting for the window to actually come down
+     * lets Back reach the app. A suppression window stops the reel still finishing its exit
+     * transition from instantly re-triggering the block.
      */
     private fun hideOverlay(performBack: Boolean) {
         blockOverlay.hide()
         overlayVisible = false
         suppressUntilMs = System.currentTimeMillis() + BACK_SUPPRESSION_MS
         if (performBack) {
-            performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            mainHandler.postDelayed({
+                performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                suppressUntilMs = System.currentTimeMillis() + BACK_SUPPRESSION_MS
+            }, BACK_ACTION_DELAY_MS)
         }
+    }
+
+    /**
+     * While the block overlay is up, swallow the hardware volume keys so the user can't turn
+     * the muted reel/short back up to hear it. Everything else passes through untouched.
+     */
+    override fun onKeyEvent(event: KeyEvent): Boolean {
+        if (overlayVisible) {
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_VOLUME_UP,
+                KeyEvent.KEYCODE_VOLUME_DOWN,
+                KeyEvent.KEYCODE_VOLUME_MUTE -> return true
+            }
+        }
+        return super.onKeyEvent(event)
     }
 
     private fun logYouTubeDiagnostics(event: AccessibilityEvent, result: YouTubeShortsDetector.DetectionResult) {
@@ -294,5 +317,9 @@ class ReelsAccessibilityService : AccessibilityService() {
         // After "Go back", detection is paused briefly so the reel still finishing its exit
         // transition can't be seen and re-blocked.
         private const val BACK_SUPPRESSION_MS = 1_200L
+
+        // Wait for the (focusable) overlay window to actually come down before pressing Back,
+        // otherwise the press races window-focus handoff and is lost.
+        private const val BACK_ACTION_DELAY_MS = 150L
     }
 }

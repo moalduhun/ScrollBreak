@@ -2,11 +2,13 @@ package com.moalduhun.scrollbreak.service
 
 import android.accessibilityservice.AccessibilityService
 import android.content.res.Configuration
+import android.database.ContentObserver
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
@@ -39,7 +41,8 @@ class BlockOverlay(private val service: AccessibilityService) {
     private val audioManager = service.getSystemService(AudioManager::class.java)
     private val handler = Handler(Looper.getMainLooper())
     private var overlayView: View? = null
-    private var muted = false
+    private var savedVolume = -1
+    private var volumeObserver: ContentObserver? = null
 
     val isShowing: Boolean get() = overlayView != null
 
@@ -78,21 +81,42 @@ class BlockOverlay(private val service: AccessibilityService) {
     }
 
     private fun muteMedia() {
-        if (muted) return
+        val am = audioManager ?: return
+        if (savedVolume >= 0) return
         try {
-            audioManager?.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_MUTE, 0)
-            muted = true
+            savedVolume = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+            am.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0)
+            // Belt-and-suspenders against raising the volume: the service also swallows the
+            // volume keys, but if any change to the media volume slips through, snap it back
+            // to 0 immediately so the reel/short can never become audible.
+            val observer = object : ContentObserver(handler) {
+                override fun onChange(selfChange: Boolean) {
+                    if (am.getStreamVolume(AudioManager.STREAM_MUSIC) != 0) {
+                        am.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0)
+                    }
+                }
+            }
+            service.contentResolver.registerContentObserver(Settings.System.CONTENT_URI, true, observer)
+            volumeObserver = observer
         } catch (_: Throwable) {
         }
     }
 
     private fun unmuteMedia() {
-        if (!muted) return
-        try {
-            audioManager?.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_UNMUTE, 0)
-        } catch (_: Throwable) {
+        volumeObserver?.let {
+            try {
+                service.contentResolver.unregisterContentObserver(it)
+            } catch (_: Throwable) {
+            }
         }
-        muted = false
+        volumeObserver = null
+        if (savedVolume >= 0) {
+            try {
+                audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, savedVolume, 0)
+            } catch (_: Throwable) {
+            }
+            savedVolume = -1
+        }
     }
 
     private fun buildView(onGoBack: () -> Unit): View {
