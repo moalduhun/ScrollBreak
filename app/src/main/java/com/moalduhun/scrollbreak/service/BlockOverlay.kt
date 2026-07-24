@@ -99,7 +99,7 @@ class BlockOverlay(private val service: AccessibilityService) {
         val night = (service.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
             Configuration.UI_MODE_NIGHT_YES
         // Match the app's palette (see ui/theme/Color.kt) for the active light/dark mode.
-        val background = if (night) 0xFF101014.toInt() else 0xFFFAFAFD.toInt()
+        val backgroundColor = if (night) 0xFF101014.toInt() else 0xFFFAFAFD.toInt()
         val mutedText = if (night) 0xFFC4C6D0.toInt() else 0xFF44464F.toInt()
         val primary = if (night) 0xFFB4B0FF.toInt() else 0xFF4F46E5.toInt()
         val primaryContainer = if (night) 0xFF322F7A.toInt() else 0xFFE4E1FF.toInt()
@@ -109,7 +109,7 @@ class BlockOverlay(private val service: AccessibilityService) {
         fun dp(v: Int): Int = (v * density).toInt()
 
         val root = FrameLayout(service).apply {
-            setBackgroundColor(background)
+            setBackgroundColor(backgroundColor)
             isClickable = true
             isFocusable = true
             isFocusableInTouchMode = true
