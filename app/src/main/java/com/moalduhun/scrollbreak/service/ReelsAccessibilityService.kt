@@ -93,7 +93,7 @@ class ReelsAccessibilityService : AccessibilityService() {
             if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
                 val p = event.packageName?.toString()
                 if (p != null && p != blockedPackage && p != SYSTEMUI_PACKAGE && p != packageName) {
-                    hideOverlay(performBack = false)
+                    hideOverlay()
                 }
             }
             return
@@ -199,45 +199,43 @@ class ReelsAccessibilityService : AccessibilityService() {
             Log.d(DIAG_TAG, ">>> BLOCKING pkg=$pkg signals=$signals")
             blockedPackage = pkg
             overlayVisible = true
+            // Cover the reel immediately, then press Back to leave it underneath the overlay.
+            // Exiting first means the user never gets to see or touch the reel, and there's
+            // nothing left to sneak back to — dismissing the overlay just reveals the screen
+            // that was already behind it. The overlay is non-focusable so this Back reaches
+            // the app, not the overlay.
             blockOverlay.show(onGoBack = ::handleGoBack)
+            performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
             scope.launch { repository.recordBlock() }
         }
     }
 
+    /**
+     * "Go back" is now just taking the overlay down — the reel/short was already exited the
+     * moment the overlay went up, so there's nothing to navigate. A brief suppression stops a
+     * reel still finishing its exit transition behind the overlay from instantly re-blocking.
+     */
     private fun handleGoBack() {
-        hideOverlay(performBack = true)
+        hideOverlay()
     }
 
-    /**
-     * Takes the overlay down and unmutes. [performBack] presses Back so the app leaves the
-     * reel/short and returns to the previous screen — used for the "Go back" button, but not
-     * when the overlay is being cleared because the user already left the app.
-     *
-     * The Back press is delayed a moment: the overlay is a focusable window, so pressing Back
-     * the instant it's removed raced the app regaining input focus and the press went nowhere
-     * (this is why "Go back" wasn't working). Waiting for the window to actually come down
-     * lets Back reach the app. A suppression window stops the reel still finishing its exit
-     * transition from instantly re-triggering the block.
-     */
-    private fun hideOverlay(performBack: Boolean) {
+    private fun hideOverlay() {
         blockOverlay.hide()
         overlayVisible = false
         suppressUntilMs = System.currentTimeMillis() + BACK_SUPPRESSION_MS
-        if (performBack) {
-            mainHandler.postDelayed({
-                performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-                suppressUntilMs = System.currentTimeMillis() + BACK_SUPPRESSION_MS
-            }, BACK_ACTION_DELAY_MS)
-        }
     }
 
     /**
-     * While the block overlay is up, swallow the hardware volume keys so the user can't turn
-     * the muted reel/short back up to hear it. Everything else passes through untouched.
+     * While the block overlay is up, swallow the hardware Back and volume keys: Back so the
+     * user can't dismiss the overlay without the button, and volume so they can't turn the
+     * muted reel/short back up. Everything else passes through untouched. (The Back that the
+     * service itself fires to leave the reel is a programmatic global action and doesn't come
+     * through here.)
      */
     override fun onKeyEvent(event: KeyEvent): Boolean {
         if (overlayVisible) {
             when (event.keyCode) {
+                KeyEvent.KEYCODE_BACK,
                 KeyEvent.KEYCODE_VOLUME_UP,
                 KeyEvent.KEYCODE_VOLUME_DOWN,
                 KeyEvent.KEYCODE_VOLUME_MUTE -> return true
@@ -317,9 +315,5 @@ class ReelsAccessibilityService : AccessibilityService() {
         // After "Go back", detection is paused briefly so the reel still finishing its exit
         // transition can't be seen and re-blocked.
         private const val BACK_SUPPRESSION_MS = 1_200L
-
-        // Wait for the (focusable) overlay window to actually come down before pressing Back,
-        // otherwise the press races window-focus handoff and is lost.
-        private const val BACK_ACTION_DELAY_MS = 150L
     }
 }

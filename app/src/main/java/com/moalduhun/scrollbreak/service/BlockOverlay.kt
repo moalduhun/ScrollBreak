@@ -11,7 +11,6 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.TypedValue
 import android.view.Gravity
-import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -54,14 +53,18 @@ class BlockOverlay(private val service: AccessibilityService) {
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            // NOT_FOCUSABLE on purpose: the service presses Back right after showing this to
+            // leave the reel/short, and a focusable overlay would swallow that Back instead of
+            // letting it reach the app. Touches still land on the view, so the button works;
+            // the hardware Back/volume keys are handled by the service's key filter instead.
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.OPAQUE
         )
         try {
             windowManager?.addView(view, params)
             overlayView = view
-            view.requestFocus()
         } catch (t: Throwable) {
             // If the overlay can't be shown, don't leave the device muted.
             unmuteMedia()
@@ -134,13 +137,9 @@ class BlockOverlay(private val service: AccessibilityService) {
 
         val root = FrameLayout(service).apply {
             setBackgroundColor(backgroundColor)
+            // Eat taps so nothing lands on the app behind. Key handling (Back/volume) is done
+            // by the service's key filter, since this window is intentionally non-focusable.
             isClickable = true
-            isFocusable = true
-            isFocusableInTouchMode = true
-            setOnKeyListener { _, keyCode, _ ->
-                // Swallow the system Back button so only the in-overlay button dismisses.
-                keyCode == KeyEvent.KEYCODE_BACK
-            }
         }
 
         val column = LinearLayout(service).apply {
