@@ -8,6 +8,7 @@ import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import com.moalduhun.scrollbreak.data.BlockerRepository
 import com.moalduhun.scrollbreak.ui.block.BlockActivity
 import kotlinx.coroutines.CoroutineScope
@@ -188,8 +189,88 @@ class ReelsAccessibilityService : AccessibilityService() {
             blockedPackage = pkg
             suppressUntilMs = now + BLOCK_SUPPRESSION_MS
             launchBlockScreen()
+            // Covering the app with the block screen pushes it to the background, which is
+            // exactly when it spawns a Picture-in-Picture mini-player that keeps the video
+            // playing in its own floating window. Chase it down and close it.
+            schedulePipDismissal()
             scope.launch { repository.recordBlock() }
         }
+    }
+
+    /**
+     * PiP doesn't appear instantly — the app enters it as it's being backgrounded, a moment
+     * after the block screen launches — so this fires a few dismissal passes over the next
+     * ~1.5s instead of a single one that might run too early.
+     */
+    private fun schedulePipDismissal() {
+        for (delay in PIP_DISMISS_DELAYS_MS) {
+            mainHandler.postDelayed({ dismissPictureInPicture() }, delay)
+        }
+    }
+
+    /**
+     * Finds any Picture-in-Picture window belonging to a blocked app and closes it. PiP is a
+     * separate, small application window (not the full-screen one the block screen covers),
+     * so it's identified by package + a size well under full-screen. Closing it is tried the
+     * robust way first — the standard [AccessibilityNodeInfo.ACTION_DISMISS] that PiP windows
+     * expose — then, failing that, by clicking a "close"/"dismiss" control inside it.
+     */
+    private fun dismissPictureInPicture() {
+        val activeWindows = try {
+            windows
+        } catch (t: Throwable) {
+            return
+        }
+        val metrics = resources.displayMetrics
+        val maxPipWidth = (metrics.widthPixels * 0.7f).toInt()
+        val maxPipHeight = (metrics.heightPixels * 0.7f).toInt()
+
+        for (window in activeWindows) {
+            if (window.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
+            val root = window.root ?: continue
+            val pkg = root.packageName?.toString()
+            if (pkg != INSTAGRAM_PACKAGE && pkg != YOUTUBE_PACKAGE) continue
+
+            val bounds = Rect().also { window.getBoundsInScreen(it) }
+            val isSmall = bounds.width() in 1 until maxPipWidth && bounds.height() in 1 until maxPipHeight
+            if (!isSmall) continue
+
+            Log.d(DIAG_TAG, "PiP window pkg=$pkg bounds=$bounds — attempting dismiss")
+            if (tryDismissWindowTree(root)) {
+                Log.d(DIAG_TAG, "PiP dismissed")
+            } else {
+                Log.d(DIAG_TAG, "PiP not dismissed this pass")
+            }
+        }
+    }
+
+    private fun tryDismissWindowTree(root: AccessibilityNodeInfo): Boolean {
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var visited = 0
+        var closeCandidate: AccessibilityNodeInfo? = null
+
+        while (queue.isNotEmpty() && visited < 200) {
+            val node = queue.removeFirst()
+            visited++
+
+            // PiP windows generally support the standard dismiss action somewhere in their
+            // tree — try it on every node and stop the moment one accepts it.
+            if (node.performAction(AccessibilityNodeInfo.ACTION_DISMISS)) return true
+
+            val desc = node.contentDescription?.toString()?.lowercase().orEmpty()
+            if (closeCandidate == null && node.isClickable &&
+                (desc.contains("close") || desc.contains("dismiss"))
+            ) {
+                closeCandidate = node
+            }
+
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+
+        return closeCandidate?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
     }
 
     private fun logYouTubeDiagnostics(event: AccessibilityEvent, result: YouTubeShortsDetector.DetectionResult) {
@@ -431,6 +512,11 @@ class ReelsAccessibilityService : AccessibilityService() {
         // events (which fire constantly while scrolling a normal feed) get re-checked.
         private const val CONTENT_CHECK_THROTTLE_MS = 120L
         private const val BLOCK_SUPPRESSION_MS = 1500L
+
+        // A PiP mini-player appears a beat after the block screen backgrounds the app, so
+        // dismissal is retried across this spread rather than fired once. Kept inside the
+        // block-suppression window so these passes can't themselves trip a re-check.
+        private val PIP_DISMISS_DELAYS_MS = longArrayOf(200L, 500L, 900L, 1400L)
 
         // How long to wait after BlockActivity finishes before navigating Instagram.
         // Sending the action immediately can hit BlockActivity's own (already-finishing)
