@@ -26,6 +26,7 @@ class BlockerRepository(private val context: Context) {
         val BLOCKING_ENABLED = booleanPreferencesKey("blocking_enabled")
         val COVER_INSTAGRAM = booleanPreferencesKey("cover_instagram")
         val COVER_YOUTUBE = booleanPreferencesKey("cover_youtube")
+        val COVER_TIKTOK = booleanPreferencesKey("cover_tiktok")
         val TOTAL_BLOCKED = intPreferencesKey("total_blocked")
         val TODAY_BLOCKED = intPreferencesKey("today_blocked")
         val TODAY_EPOCH_DAY = longPreferencesKey("today_epoch_day")
@@ -43,6 +44,10 @@ class BlockerRepository(private val context: Context) {
 
     val coverYouTube: Flow<Boolean> = context.dataStore.data.map { prefs ->
         prefs[Keys.COVER_YOUTUBE] ?: true
+    }
+
+    val coverTiktok: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[Keys.COVER_TIKTOK] ?: true
     }
 
     val totalBlockedCount: Flow<Int> = context.dataStore.data.map { prefs ->
@@ -74,6 +79,10 @@ class BlockerRepository(private val context: Context) {
 
     suspend fun setCoverYouTube(enabled: Boolean) {
         context.dataStore.edit { prefs -> prefs[Keys.COVER_YOUTUBE] = enabled }
+    }
+
+    suspend fun setCoverTiktok(enabled: Boolean) {
+        context.dataStore.edit { prefs -> prefs[Keys.COVER_TIKTOK] = enabled }
     }
 
     suspend fun recordBlock() {
