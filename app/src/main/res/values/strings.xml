@@ -1,4 +1,7 @@
 <resources>
     <string name="app_name">Scroll Break</string>
     <string name="accessibility_service_description">Lets ScrollBreak see when Instagram Reels or YouTube Shorts open, so it can block them. It does not read your messages or personal data.</string>
+    <string name="block_overlay_message">ScrollBreak stopped that before it could pull you in.</string>
+    <string name="block_overlay_go_back">Go back</string>
+    <string name="block_overlay_cooldown">You can go back in %1$ds</string>
 </resources>
