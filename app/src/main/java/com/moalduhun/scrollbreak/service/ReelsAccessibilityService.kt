@@ -209,11 +209,15 @@ class ReelsAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Finds any Picture-in-Picture window belonging to a blocked app and closes it. PiP is a
-     * separate, small application window (not the full-screen one the block screen covers),
-     * so it's identified by package + a size well under full-screen. Closing it is tried the
-     * robust way first — the standard [AccessibilityNodeInfo.ACTION_DISMISS] that PiP windows
-     * expose — then, failing that, by clicking a "close"/"dismiss" control inside it.
+     * Finds a blocked app's Picture-in-Picture mini-player and closes it.
+     *
+     * Confirmed on a real Samsung capture: the PiP is a small application window belonging to
+     * the app (YouTube), but its "Close" affordance is NOT inside that window — it lives in a
+     * separate `com.android.systemui` overlay ("Open in split screen view | Expand | Close |
+     * Settings"), and [AccessibilityNodeInfo.ACTION_DISMISS] on the app window is rejected.
+     * So this first locates the PiP window (to confirm PiP is up and get its position), then
+     * searches EVERY window — including the system overlay — for either a working dismiss
+     * action or a clickable "Close" control sitting over the PiP.
      */
     private fun dismissPictureInPicture() {
         val activeWindows = try {
@@ -225,6 +229,7 @@ class ReelsAccessibilityService : AccessibilityService() {
         val maxPipWidth = (metrics.widthPixels * 0.7f).toInt()
         val maxPipHeight = (metrics.heightPixels * 0.7f).toInt()
 
+        var pipBounds: Rect? = null
         for (window in activeWindows) {
             if (window.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
             val root = window.root ?: continue
@@ -232,45 +237,83 @@ class ReelsAccessibilityService : AccessibilityService() {
             if (pkg != INSTAGRAM_PACKAGE && pkg != YOUTUBE_PACKAGE) continue
 
             val bounds = Rect().also { window.getBoundsInScreen(it) }
-            val isSmall = bounds.width() in 1 until maxPipWidth && bounds.height() in 1 until maxPipHeight
-            if (!isSmall) continue
-
-            Log.d(DIAG_TAG, "PiP window pkg=$pkg bounds=$bounds — attempting dismiss")
-            if (tryDismissWindowTree(root)) {
-                Log.d(DIAG_TAG, "PiP dismissed")
-            } else {
-                Log.d(DIAG_TAG, "PiP not dismissed this pass")
+            if (bounds.width() in 1 until maxPipWidth && bounds.height() in 1 until maxPipHeight) {
+                pipBounds = bounds
+                // Some devices do accept dismiss on the app window — try it before looking
+                // for the system overlay's Close button.
+                if (tryDismissTree(root)) {
+                    Log.d(DIAG_TAG, "PiP dismissed via app window")
+                    return
+                }
             }
         }
+
+        val pip = pipBounds ?: return
+        Log.d(DIAG_TAG, "PiP present at $pip — searching all windows for a close control")
+
+        // The close control usually overlays the PiP; only accept one that sits over it so we
+        // can't accidentally click an unrelated "Close" elsewhere on screen.
+        val searchArea = Rect(pip).apply { inset(-160, -160) }
+        for (window in activeWindows) {
+            val root = window.root ?: continue
+            if (tryDismissTree(root)) {
+                Log.d(DIAG_TAG, "PiP dismissed via ${root.packageName}")
+                return
+            }
+            val closer = findCloseControlOver(root, searchArea)
+            if (closer != null) {
+                val ok = closer.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                Log.d(DIAG_TAG, "Clicked PiP close in ${root.packageName} ok=$ok")
+                if (ok) return
+            }
+        }
+        Log.d(DIAG_TAG, "PiP still up after this pass")
     }
 
-    private fun tryDismissWindowTree(root: AccessibilityNodeInfo): Boolean {
+    /** Tries [AccessibilityNodeInfo.ACTION_DISMISS] on every node; true if any accepts it. */
+    private fun tryDismissTree(root: AccessibilityNodeInfo): Boolean {
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.add(root)
         var visited = 0
-        var closeCandidate: AccessibilityNodeInfo? = null
-
-        while (queue.isNotEmpty() && visited < 200) {
+        while (queue.isNotEmpty() && visited < 250) {
             val node = queue.removeFirst()
             visited++
-
-            // PiP windows generally support the standard dismiss action somewhere in their
-            // tree — try it on every node and stop the moment one accepts it.
             if (node.performAction(AccessibilityNodeInfo.ACTION_DISMISS)) return true
-
-            val desc = node.contentDescription?.toString()?.lowercase().orEmpty()
-            if (closeCandidate == null && node.isClickable &&
-                (desc.contains("close") || desc.contains("dismiss"))
-            ) {
-                closeCandidate = node
-            }
-
             for (i in 0 until node.childCount) {
                 node.getChild(i)?.let { queue.add(it) }
             }
         }
+        return false
+    }
 
-        return closeCandidate?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
+    /** Finds a clickable "Close" node whose bounds fall within [area] (over the PiP). */
+    private fun findCloseControlOver(root: AccessibilityNodeInfo, area: Rect): AccessibilityNodeInfo? {
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var visited = 0
+        while (queue.isNotEmpty() && visited < 300) {
+            val node = queue.removeFirst()
+            visited++
+            val desc = node.contentDescription?.toString()?.lowercase().orEmpty()
+            val text = node.text?.toString()?.lowercase().orEmpty()
+            val looksLikeClose = desc.contains("close") || text == "close"
+            if (looksLikeClose) {
+                val bounds = Rect().also { node.getBoundsInScreen(it) }
+                if (Rect.intersects(area, bounds)) {
+                    // The labelled node isn't always the clickable one — the tappable target
+                    // is often an ancestor, so climb to the nearest clickable one.
+                    var candidate: AccessibilityNodeInfo? = node
+                    while (candidate != null && !candidate.isClickable) {
+                        candidate = candidate.parent
+                    }
+                    return candidate ?: node
+                }
+            }
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+        return null
     }
 
     private fun logYouTubeDiagnostics(event: AccessibilityEvent, result: YouTubeShortsDetector.DetectionResult) {
@@ -513,10 +556,12 @@ class ReelsAccessibilityService : AccessibilityService() {
         private const val CONTENT_CHECK_THROTTLE_MS = 120L
         private const val BLOCK_SUPPRESSION_MS = 1500L
 
-        // A PiP mini-player appears a beat after the block screen backgrounds the app, so
-        // dismissal is retried across this spread rather than fired once. Kept inside the
-        // block-suppression window so these passes can't themselves trip a re-check.
-        private val PIP_DISMISS_DELAYS_MS = longArrayOf(200L, 500L, 900L, 1400L)
+        // A PiP mini-player appears a beat after the block screen backgrounds the app — a
+        // real capture showed it landing ~600ms later and the system's Close overlay a moment
+        // after that — so dismissal is retried across this spread rather than fired once.
+        // Later passes run after the block-suppression window, which is fine: they only read
+        // windows and click Close, they don't re-run detection.
+        private val PIP_DISMISS_DELAYS_MS = longArrayOf(400L, 800L, 1200L, 1800L, 2500L)
 
         // How long to wait after BlockActivity finishes before navigating Instagram.
         // Sending the action immediately can hit BlockActivity's own (already-finishing)
