@@ -35,29 +35,38 @@ object FacebookReelsDetector {
     private const val FULLSCREEN_WIDTH_RATIO = 0.85f
     private const val FULLSCREEN_HEIGHT_RATIO = 0.55f
 
+    // A reel embedded in the feed is smaller than full-screen but still a real video area
+    // (confirmed ~684x1216 in a capture). Small tray labels and the nav tab fall under these.
+    private const val FEED_WIDTH_RATIO = 0.40f
+    private const val FEED_HEIGHT_RATIO = 0.30f
+
     private const val REEL_DESC_KEYWORD = "reel"
 
     private val DIAGNOSTIC_KEYWORDS =
         listOf("reel", "surface", "texture", "video", "player", "seek", "scrub", "like", "comment")
 
     data class DetectionResult(
-        val isReels: Boolean,
+        /** A dedicated full-screen reel player is showing — cover the whole screen and block. */
+        val isFullScreenReel: Boolean,
+        /** Bounds of reel(s) embedded in a scrolling feed to cover in place, or null. */
+        val feedReelBounds: Rect?,
         val matchedSignals: List<String>,
         val diagnostics: List<String>
     )
 
     fun evaluate(root: AccessibilityNodeInfo?): DetectionResult {
-        if (root == null) return DetectionResult(false, emptyList(), emptyList())
+        if (root == null) return DetectionResult(false, null, emptyList(), emptyList())
 
         val windowBounds = Rect().also { root.getBoundsInScreen(it) }
         val winWidth = windowBounds.width()
         val winHeight = windowBounds.height()
-        if (winWidth <= 0 || winHeight <= 0) return DetectionResult(false, emptyList(), emptyList())
+        if (winWidth <= 0 || winHeight <= 0) return DetectionResult(false, null, emptyList(), emptyList())
 
         val matched = mutableSetOf<String>()
         val diagnostics = mutableListOf<String>()
         var nodesVisited = 0
         var hasReelPlayer = false
+        var feedUnion: Rect? = null
 
         val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
         queue.add(root to 0)
@@ -71,17 +80,21 @@ object FacebookReelsDetector {
             val resourceId = node.viewIdResourceName?.lowercase().orEmpty()
             val contentDesc = node.contentDescription?.toString()?.lowercase().orEmpty()
 
-            // The one signal that separates the reel player from the feed: a visible node with
-            // "reel" in its description that spans most of the width and a good part of the
-            // height. On the feed the equivalent nodes are collapsed / not visible, and the
-            // visible reel references are small tray thumbnails.
-            if (!hasReelPlayer && isVisible && contentDesc.contains(REEL_DESC_KEYWORD)) {
+            // A visible node with "reel" in its description. If it spans most of the width and
+            // a good part of the height it's the full-screen player; if it's smaller but still
+            // a real video area it's a reel embedded in the feed to cover in place. On the feed
+            // the full-screen equivalents are collapsed/invisible and only these mid-size reel
+            // videos are visible, so the two never collide.
+            if (isVisible && contentDesc.contains(REEL_DESC_KEYWORD)) {
                 val bounds = Rect().also { node.getBoundsInScreen(it) }
-                val isFullScreen = bounds.width() >= winWidth * FULLSCREEN_WIDTH_RATIO &&
-                    bounds.height() >= winHeight * FULLSCREEN_HEIGHT_RATIO
-                if (isFullScreen) {
+                val wr = bounds.width().toFloat() / winWidth
+                val hr = bounds.height().toFloat() / winHeight
+                if (wr >= FULLSCREEN_WIDTH_RATIO && hr >= FULLSCREEN_HEIGHT_RATIO) {
                     hasReelPlayer = true
-                    matched += "reel_player:${contentDesc.take(30)}"
+                    matched += "reel_player:${contentDesc.take(24)}"
+                } else if (wr >= FEED_WIDTH_RATIO && hr >= FEED_HEIGHT_RATIO) {
+                    feedUnion = feedUnion?.also { it.union(bounds) } ?: Rect(bounds)
+                    matched += "feed_reel:${contentDesc.take(24)}"
                 }
             }
 
@@ -110,7 +123,15 @@ object FacebookReelsDetector {
             recycleSafely(queue.removeFirst().first)
         }
 
-        return DetectionResult(hasReelPlayer, matched.toList(), diagnostics)
+        // The full-screen player wins — don't also try to cover a feed reel in that case. Clamp
+        // the feed union to the window so an oddly-reported node can't push it off-screen.
+        val feedBounds = if (hasReelPlayer) {
+            null
+        } else {
+            feedUnion?.takeIf { it.intersect(windowBounds) }
+        }
+
+        return DetectionResult(hasReelPlayer, feedBounds, matched.toList(), diagnostics)
     }
 
     @Suppress("DEPRECATION")

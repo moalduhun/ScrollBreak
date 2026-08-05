@@ -36,6 +36,7 @@ class ReelsAccessibilityService : AccessibilityService() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var repository: BlockerRepository
     private lateinit var blockOverlay: BlockOverlay
+    private lateinit var feedReelCover: FeedReelCover
 
     @Volatile private var blockingEnabled = true
     // Per-app coverage the user picks on the Home screen — an app is only checked/blocked
@@ -72,6 +73,7 @@ class ReelsAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         repository = BlockerRepository(applicationContext)
         blockOverlay = BlockOverlay(this)
+        feedReelCover = FeedReelCover(this)
         scope.launch {
             repository.isBlockingEnabled.collect { enabled -> blockingEnabled = enabled }
         }
@@ -107,6 +109,15 @@ class ReelsAccessibilityService : AccessibilityService() {
             return
         }
 
+        // The in-feed reel cover (Facebook) lives outside the full-overlay flow, so tear it
+        // down if the user navigates away from Facebook to anything else.
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && feedReelCover.isShowing) {
+            val p = event.packageName?.toString()
+            if (p != FACEBOOK_PACKAGE && p != SYSTEMUI_PACKAGE && p != packageName) {
+                feedReelCover.hide()
+            }
+        }
+
         if (!blockingEnabled) return
         val pkg = event.packageName?.toString()
         if (pkg != INSTAGRAM_PACKAGE && pkg != YOUTUBE_PACKAGE &&
@@ -118,7 +129,10 @@ class ReelsAccessibilityService : AccessibilityService() {
         if (pkg == INSTAGRAM_PACKAGE && !coverInstagram) return
         if (pkg == YOUTUBE_PACKAGE && !coverYouTube) return
         if (pkg == TIKTOK_PACKAGE && !coverTiktok) return
-        if (pkg == FACEBOOK_PACKAGE && !coverFacebook) return
+        if (pkg == FACEBOOK_PACKAGE && !coverFacebook) {
+            feedReelCover.hide()
+            return
+        }
 
         val now = System.currentTimeMillis()
         if (now < suppressUntilMs) return
@@ -137,18 +151,60 @@ class ReelsAccessibilityService : AccessibilityService() {
                     dispatchCheck(now, pkg, event.className)
                 }
             }
+            // Scrolling the Facebook feed moves an embedded reel, so re-check to keep the
+            // in-feed cover tracking it. Only Facebook needs this; the others block wholesale.
+            AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
+                if (pkg == FACEBOOK_PACKAGE && now - lastContentCheckMs >= CONTENT_CHECK_THROTTLE_MS) {
+                    lastContentCheckMs = now
+                    dispatchCheck(now, pkg, event.className)
+                }
+            }
             // A content-grid tap is only a signal for Instagram's Explore path.
             AccessibilityEvent.TYPE_VIEW_CLICKED -> if (pkg == INSTAGRAM_PACKAGE) recordContentTap(event)
         }
     }
 
     private fun dispatchCheck(now: Long, pkg: String, windowClassName: CharSequence?) {
-        // TikTok is blocked as a whole app (every screen is short-form), so it doesn't run the
-        // per-screen reel detection the other two use — any TikTok window gets covered.
-        if (pkg == TIKTOK_PACKAGE) {
-            blockTikTok(windowClassName)
+        when (pkg) {
+            // TikTok is blocked as a whole app (every screen is short-form), so it doesn't run
+            // the per-screen reel detection the others use — any TikTok window gets covered.
+            TIKTOK_PACKAGE -> blockTikTok(windowClassName)
+            // Facebook mixes a full-screen reel player (full block) with reels embedded in the
+            // feed (cover just the video, in place), so it has its own path.
+            FACEBOOK_PACKAGE -> checkFacebook(windowClassName)
+            else -> checkForShortForm(now, pkg, windowClassName)
+        }
+    }
+
+    /**
+     * Facebook has two reel surfaces: the dedicated full-screen player (covered and backed out
+     * of like a Reel/Short) and reels embedded in the scrolling News Feed (covered in place by
+     * a black patch that tracks the video and mutes it, so the rest of the feed stays usable).
+     */
+    private fun checkFacebook(windowClassName: CharSequence?) {
+        val root = rootInActiveWindow ?: return
+        val result = try {
+            FacebookReelsDetector.evaluate(root)
+        } catch (t: Throwable) {
+            Log.w(DIAG_TAG, "Facebook detection failed", t)
+            return
+        }
+        logFacebookDiagnostics(windowClassName, result)
+
+        if (result.isFullScreenReel) {
+            feedReelCover.hide()
+            Log.d(DIAG_TAG, ">>> BLOCKING Facebook reel player signals=${result.matchedSignals}")
+            blockedPackage = FACEBOOK_PACKAGE
+            overlayVisible = true
+            blockOverlay.show(onGoBack = ::handleGoBack)
+            performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            scope.launch { repository.recordBlock() }
+        } else if (result.feedReelBounds != null) {
+            val firstShow = !feedReelCover.isShowing
+            feedReelCover.showAt(result.feedReelBounds)
+            if (firstShow) scope.launch { repository.recordBlock() }
         } else {
-            checkForShortForm(now, pkg, windowClassName)
+            feedReelCover.hide()
         }
     }
 
@@ -225,16 +281,6 @@ class ReelsAccessibilityService : AccessibilityService() {
             }
             logYouTubeDiagnostics(windowClassName, result)
             isBlocked = result.isShorts
-            signals = result.matchedSignals
-        } else if (pkg == FACEBOOK_PACKAGE) {
-            val result = try {
-                FacebookReelsDetector.evaluate(root)
-            } catch (t: Throwable) {
-                Log.w(DIAG_TAG, "Facebook detection failed", t)
-                return
-            }
-            logFacebookDiagnostics(windowClassName, result)
-            isBlocked = result.isReels
             signals = result.matchedSignals
         } else {
             val recentContentTap = now - lastContentTapMs < CONTENT_TAP_WINDOW_MS
@@ -336,7 +382,11 @@ class ReelsAccessibilityService : AccessibilityService() {
 
     private fun logFacebookDiagnostics(windowClassName: CharSequence?, result: FacebookReelsDetector.DetectionResult) {
         val windowClass = windowClassName ?: "unknown"
-        Log.d(DIAG_TAG, "--- FB check windowClass=$windowClass isReels=${result.isReels} ---")
+        Log.d(
+            DIAG_TAG,
+            "--- FB check windowClass=$windowClass fullScreen=${result.isFullScreenReel} " +
+                "feedReel=${result.feedReelBounds} ---"
+        )
         if (result.matchedSignals.isNotEmpty()) {
             Log.d(DIAG_TAG, "FB matched=${result.matchedSignals}")
         }
@@ -374,9 +424,10 @@ class ReelsAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // Make sure we never leave the device muted or the overlay stranded if the service
+        // Make sure we never leave the device muted or an overlay stranded if the service
         // is torn down while a block is showing.
         if (::blockOverlay.isInitialized) blockOverlay.hide()
+        if (::feedReelCover.isInitialized) feedReelCover.hide()
         mainHandler.removeCallbacksAndMessages(null)
         job.cancel()
     }

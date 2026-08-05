@@ -538,7 +538,7 @@ private fun AppsCoverageDialog(
                 AppToggleRow(
                     icon = Icons.Filled.ThumbUp,
                     name = "Facebook Reels",
-                    subtitle = "Reels player; feed and Messenger keep working",
+                    subtitle = "Reels player and in-feed reels; feed stays usable",
                     checked = coverFacebook,
                     onCheckedChange = onToggleFacebook
                 )

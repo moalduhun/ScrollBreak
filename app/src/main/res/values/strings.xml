@@ -4,4 +4,5 @@
     <string name="block_overlay_message">ScrollBreak stopped that before it could pull you in.</string>
     <string name="block_overlay_go_back">Go back</string>
     <string name="block_overlay_cooldown">You can go back in %1$ds</string>
+    <string name="feed_reel_blocked">Reel blocked</string>
 </resources>
