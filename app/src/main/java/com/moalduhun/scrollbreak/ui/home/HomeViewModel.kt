@@ -26,6 +26,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     val coverTiktok: StateFlow<Boolean> = repository.coverTiktok
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
 
+    val coverFacebook: StateFlow<Boolean> = repository.coverFacebook
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
+
     val todayBlockedCount: StateFlow<Int> = repository.todayBlockedCount
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
@@ -49,5 +52,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setCoverTiktok(enabled: Boolean) {
         viewModelScope.launch { repository.setCoverTiktok(enabled) }
+    }
+
+    fun setCoverFacebook(enabled: Boolean) {
+        viewModelScope.launch { repository.setCoverFacebook(enabled) }
     }
 }

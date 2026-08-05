@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material.icons.filled.PauseCircle
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Security
@@ -65,7 +66,7 @@ private const val CHART_TRACK_HEIGHT_DP = 108
 private data class HowItWorksItem(val text: String)
 
 private val HOW_IT_WORKS = listOf(
-    HowItWorksItem("Watches for Instagram Reels, YouTube Shorts and TikTok"),
+    HowItWorksItem("Watches Instagram Reels, YouTube Shorts, TikTok and Facebook"),
     HowItWorksItem("Blocks them the moment they appear, before they hook you"),
     HowItWorksItem("DMs, posts, stories, search and normal videos keep working")
 )
@@ -76,6 +77,7 @@ fun HomeRoute(viewModel: HomeViewModel = viewModel()) {
     val coverInstagram by viewModel.coverInstagram.collectAsState()
     val coverYouTube by viewModel.coverYouTube.collectAsState()
     val coverTiktok by viewModel.coverTiktok.collectAsState()
+    val coverFacebook by viewModel.coverFacebook.collectAsState()
     val todayCount by viewModel.todayBlockedCount.collectAsState()
     val totalCount by viewModel.totalBlockedCount.collectAsState()
     val weekly by viewModel.weeklyBlocks.collectAsState()
@@ -85,13 +87,15 @@ fun HomeRoute(viewModel: HomeViewModel = viewModel()) {
         coverInstagram = coverInstagram,
         coverYouTube = coverYouTube,
         coverTiktok = coverTiktok,
+        coverFacebook = coverFacebook,
         todayCount = todayCount,
         totalCount = totalCount,
         weekly = weekly,
         onToggle = viewModel::setBlockingEnabled,
         onToggleInstagram = viewModel::setCoverInstagram,
         onToggleYouTube = viewModel::setCoverYouTube,
-        onToggleTiktok = viewModel::setCoverTiktok
+        onToggleTiktok = viewModel::setCoverTiktok,
+        onToggleFacebook = viewModel::setCoverFacebook
     )
 }
 
@@ -101,13 +105,15 @@ fun HomeScreen(
     coverInstagram: Boolean,
     coverYouTube: Boolean,
     coverTiktok: Boolean,
+    coverFacebook: Boolean,
     todayCount: Int,
     totalCount: Int,
     weekly: List<DailyBlocks>,
     onToggle: (Boolean) -> Unit,
     onToggleInstagram: (Boolean) -> Unit,
     onToggleYouTube: (Boolean) -> Unit,
-    onToggleTiktok: (Boolean) -> Unit
+    onToggleTiktok: (Boolean) -> Unit,
+    onToggleFacebook: (Boolean) -> Unit
 ) {
     var showAppsDialog by remember { mutableStateOf(false) }
 
@@ -145,6 +151,7 @@ fun HomeScreen(
                     coverInstagram = coverInstagram,
                     coverYouTube = coverYouTube,
                     coverTiktok = coverTiktok,
+                    coverFacebook = coverFacebook,
                     onEdit = { showAppsDialog = true }
                 )
             }
@@ -170,9 +177,11 @@ fun HomeScreen(
             coverInstagram = coverInstagram,
             coverYouTube = coverYouTube,
             coverTiktok = coverTiktok,
+            coverFacebook = coverFacebook,
             onToggleInstagram = onToggleInstagram,
             onToggleYouTube = onToggleYouTube,
             onToggleTiktok = onToggleTiktok,
+            onToggleFacebook = onToggleFacebook,
             onDismiss = { showAppsDialog = false }
         )
     }
@@ -260,12 +269,14 @@ private fun CoveredAppsCard(
     coverInstagram: Boolean,
     coverYouTube: Boolean,
     coverTiktok: Boolean,
+    coverFacebook: Boolean,
     onEdit: () -> Unit
 ) {
     val covered = buildList {
         if (coverInstagram) add("Instagram Reels")
         if (coverYouTube) add("YouTube Shorts")
         if (coverTiktok) add("TikTok")
+        if (coverFacebook) add("Facebook Reels")
     }
     val summary = if (covered.isEmpty()) "No apps selected" else covered.joinToString(" · ")
 
@@ -472,9 +483,11 @@ private fun AppsCoverageDialog(
     coverInstagram: Boolean,
     coverYouTube: Boolean,
     coverTiktok: Boolean,
+    coverFacebook: Boolean,
     onToggleInstagram: (Boolean) -> Unit,
     onToggleYouTube: (Boolean) -> Unit,
     onToggleTiktok: (Boolean) -> Unit,
+    onToggleFacebook: (Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
     Dialog(onDismissRequest = onDismiss) {
@@ -520,6 +533,14 @@ private fun AppsCoverageDialog(
                     subtitle = "Blocks the whole app",
                     checked = coverTiktok,
                     onCheckedChange = onToggleTiktok
+                )
+                Spacer(Modifier.height(12.dp))
+                AppToggleRow(
+                    icon = Icons.Filled.ThumbUp,
+                    name = "Facebook Reels",
+                    subtitle = "Reels player; feed and Messenger keep working",
+                    checked = coverFacebook,
+                    onCheckedChange = onToggleFacebook
                 )
 
                 Spacer(Modifier.height(24.dp))
@@ -616,13 +637,15 @@ private fun HomeScreenPreview() {
             coverInstagram = true,
             coverYouTube = true,
             coverTiktok = true,
+            coverFacebook = true,
             todayCount = 4,
             totalCount = 42,
             weekly = sample,
             onToggle = {},
             onToggleInstagram = {},
             onToggleYouTube = {},
-            onToggleTiktok = {}
+            onToggleTiktok = {},
+            onToggleFacebook = {}
         )
     }
 }

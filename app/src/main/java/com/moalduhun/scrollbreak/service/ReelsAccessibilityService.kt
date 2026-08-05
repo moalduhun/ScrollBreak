@@ -44,6 +44,7 @@ class ReelsAccessibilityService : AccessibilityService() {
     @Volatile private var coverInstagram = true
     @Volatile private var coverYouTube = true
     @Volatile private var coverTiktok = true
+    @Volatile private var coverFacebook = true
     @Volatile private var lastContentCheckMs = 0L
     @Volatile private var suppressUntilMs = 0L
 
@@ -83,6 +84,9 @@ class ReelsAccessibilityService : AccessibilityService() {
         scope.launch {
             repository.coverTiktok.collect { enabled -> coverTiktok = enabled }
         }
+        scope.launch {
+            repository.coverFacebook.collect { enabled -> coverFacebook = enabled }
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
@@ -105,11 +109,16 @@ class ReelsAccessibilityService : AccessibilityService() {
 
         if (!blockingEnabled) return
         val pkg = event.packageName?.toString()
-        if (pkg != INSTAGRAM_PACKAGE && pkg != YOUTUBE_PACKAGE && pkg != TIKTOK_PACKAGE) return
+        if (pkg != INSTAGRAM_PACKAGE && pkg != YOUTUBE_PACKAGE &&
+            pkg != TIKTOK_PACKAGE && pkg != FACEBOOK_PACKAGE
+        ) {
+            return
+        }
         // Respect the user's per-app choice: skip an app entirely while its coverage is off.
         if (pkg == INSTAGRAM_PACKAGE && !coverInstagram) return
         if (pkg == YOUTUBE_PACKAGE && !coverYouTube) return
         if (pkg == TIKTOK_PACKAGE && !coverTiktok) return
+        if (pkg == FACEBOOK_PACKAGE && !coverFacebook) return
 
         val now = System.currentTimeMillis()
         if (now < suppressUntilMs) return
@@ -217,6 +226,16 @@ class ReelsAccessibilityService : AccessibilityService() {
             logYouTubeDiagnostics(windowClassName, result)
             isBlocked = result.isShorts
             signals = result.matchedSignals
+        } else if (pkg == FACEBOOK_PACKAGE) {
+            val result = try {
+                FacebookReelsDetector.evaluate(root)
+            } catch (t: Throwable) {
+                Log.w(DIAG_TAG, "Facebook detection failed", t)
+                return
+            }
+            logFacebookDiagnostics(windowClassName, result)
+            isBlocked = result.isReels
+            signals = result.matchedSignals
         } else {
             val recentContentTap = now - lastContentTapMs < CONTENT_TAP_WINDOW_MS
             val result = try {
@@ -315,6 +334,19 @@ class ReelsAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun logFacebookDiagnostics(windowClassName: CharSequence?, result: FacebookReelsDetector.DetectionResult) {
+        val windowClass = windowClassName ?: "unknown"
+        Log.d(DIAG_TAG, "--- FB check windowClass=$windowClass isReels=${result.isReels} ---")
+        if (result.matchedSignals.isNotEmpty()) {
+            Log.d(DIAG_TAG, "FB matched=${result.matchedSignals}")
+        }
+        if (result.diagnostics.isEmpty()) {
+            Log.d(DIAG_TAG, "no reel/video-flavoured nodes on this Facebook screen")
+        } else {
+            result.diagnostics.forEach { Log.d(DIAG_TAG, "FB $it") }
+        }
+    }
+
     /**
      * Prints exactly what the detector saw on this screen, so real behaviour can be captured
      * with `adb logcat -s ScrollBreakDiag:V` and used to tune the keywords/thresholds.
@@ -354,6 +386,7 @@ class ReelsAccessibilityService : AccessibilityService() {
         private const val INSTAGRAM_PACKAGE = "com.instagram.android"
         private const val YOUTUBE_PACKAGE = "com.google.android.youtube"
         private const val TIKTOK_PACKAGE = "com.zhiliaoapp.musically"
+        private const val FACEBOOK_PACKAGE = "com.facebook.katana"
         private const val SYSTEMUI_PACKAGE = "com.android.systemui"
 
         // A tap counts as "on the content grid" only in this vertical band — above it is
