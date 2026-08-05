@@ -137,6 +137,10 @@ class ReelsAccessibilityService : AccessibilityService() {
         val now = System.currentTimeMillis()
         if (now < suppressUntilMs) return
 
+        // Facebook's in-feed reel cover has to follow the video as it scrolls, so it re-checks
+        // much more often than the once-per-open detection the other apps need.
+        val throttle = if (pkg == FACEBOOK_PACKAGE) FEED_COVER_THROTTLE_MS else CONTENT_CHECK_THROTTLE_MS
+
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                 // A window-state change is the app coming to the foreground / switching
@@ -146,15 +150,15 @@ class ReelsAccessibilityService : AccessibilityService() {
                 scheduleForegroundBurst(pkg, event.className)
             }
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
-                if (now - lastContentCheckMs >= CONTENT_CHECK_THROTTLE_MS) {
+                if (now - lastContentCheckMs >= throttle) {
                     lastContentCheckMs = now
                     dispatchCheck(now, pkg, event.className)
                 }
             }
             // Scrolling the Facebook feed moves an embedded reel, so re-check to keep the
-            // in-feed cover tracking it. Only Facebook needs this; the others block wholesale.
+            // in-feed cover tracking and resizing it. Only Facebook needs this.
             AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
-                if (pkg == FACEBOOK_PACKAGE && now - lastContentCheckMs >= CONTENT_CHECK_THROTTLE_MS) {
+                if (pkg == FACEBOOK_PACKAGE && now - lastContentCheckMs >= throttle) {
                     lastContentCheckMs = now
                     dispatchCheck(now, pkg, event.className)
                 }
@@ -199,9 +203,9 @@ class ReelsAccessibilityService : AccessibilityService() {
             blockOverlay.show(onGoBack = ::handleGoBack)
             performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
             scope.launch { repository.recordBlock() }
-        } else if (result.feedReelBounds != null) {
+        } else if (result.feedReelBounds.isNotEmpty()) {
             val firstShow = !feedReelCover.isShowing
-            feedReelCover.showAt(result.feedReelBounds)
+            feedReelCover.showRegions(result.feedReelBounds)
             if (firstShow) scope.launch { repository.recordBlock() }
         } else {
             feedReelCover.hide()
@@ -456,6 +460,10 @@ class ReelsAccessibilityService : AccessibilityService() {
         // Right after a covered app is foregrounded, re-check on this spread so the block lands
         // as soon as the view tree is ready rather than waiting for the next content event.
         private val FOREGROUND_BURST_DELAYS_MS = longArrayOf(40L, 120L, 250L, 450L, 800L)
+
+        // Facebook re-checks this often so the in-feed reel cover keeps up with scrolling.
+        // Lower than the general throttle because the patch has to track a moving video.
+        private const val FEED_COVER_THROTTLE_MS = 40L
 
         // After "Go back", detection is paused briefly so the reel still finishing its exit
         // transition can't be seen and re-blocked.

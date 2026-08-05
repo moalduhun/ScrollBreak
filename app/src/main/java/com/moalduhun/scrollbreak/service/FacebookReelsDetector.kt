@@ -42,31 +42,34 @@ object FacebookReelsDetector {
 
     private const val REEL_DESC_KEYWORD = "reel"
 
+    // Rects within this many px of each other are treated as the same reel when merging.
+    private const val MERGE_INSET = 12
+
     private val DIAGNOSTIC_KEYWORDS =
         listOf("reel", "surface", "texture", "video", "player", "seek", "scrub", "like", "comment")
 
     data class DetectionResult(
         /** A dedicated full-screen reel player is showing — cover the whole screen and block. */
         val isFullScreenReel: Boolean,
-        /** Bounds of reel(s) embedded in a scrolling feed to cover in place, or null. */
-        val feedReelBounds: Rect?,
+        /** One rect per reel embedded in a scrolling feed, to cover in place (may be empty). */
+        val feedReelBounds: List<Rect>,
         val matchedSignals: List<String>,
         val diagnostics: List<String>
     )
 
     fun evaluate(root: AccessibilityNodeInfo?): DetectionResult {
-        if (root == null) return DetectionResult(false, null, emptyList(), emptyList())
+        if (root == null) return DetectionResult(false, emptyList(), emptyList(), emptyList())
 
         val windowBounds = Rect().also { root.getBoundsInScreen(it) }
         val winWidth = windowBounds.width()
         val winHeight = windowBounds.height()
-        if (winWidth <= 0 || winHeight <= 0) return DetectionResult(false, null, emptyList(), emptyList())
+        if (winWidth <= 0 || winHeight <= 0) return DetectionResult(false, emptyList(), emptyList(), emptyList())
 
         val matched = mutableSetOf<String>()
         val diagnostics = mutableListOf<String>()
         var nodesVisited = 0
         var hasReelPlayer = false
-        var feedUnion: Rect? = null
+        val feedRects = mutableListOf<Rect>()
 
         val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
         queue.add(root to 0)
@@ -93,7 +96,7 @@ object FacebookReelsDetector {
                     hasReelPlayer = true
                     matched += "reel_player:${contentDesc.take(24)}"
                 } else if (wr >= FEED_WIDTH_RATIO && hr >= FEED_HEIGHT_RATIO) {
-                    feedUnion = feedUnion?.also { it.union(bounds) } ?: Rect(bounds)
+                    if (bounds.intersect(windowBounds)) feedRects += Rect(bounds)
                     matched += "feed_reel:${contentDesc.take(24)}"
                 }
             }
@@ -123,15 +126,39 @@ object FacebookReelsDetector {
             recycleSafely(queue.removeFirst().first)
         }
 
-        // The full-screen player wins — don't also try to cover a feed reel in that case. Clamp
-        // the feed union to the window so an oddly-reported node can't push it off-screen.
-        val feedBounds = if (hasReelPlayer) {
-            null
-        } else {
-            feedUnion?.takeIf { it.intersect(windowBounds) }
-        }
+        // The full-screen player wins — don't also cover feed reels in that case. Otherwise
+        // merge the per-node rects into one region per reel (a single reel exposes several
+        // overlapping "reel" nodes), while keeping distinct reels as separate covers.
+        val feedBounds = if (hasReelPlayer) emptyList() else mergeOverlapping(feedRects)
 
         return DetectionResult(hasReelPlayer, feedBounds, matched.toList(), diagnostics)
+    }
+
+    /**
+     * Collapses rectangles that overlap (after a small inflation, so a reel's touching-but-not
+     * quite-overlapping nodes merge) into one rect each, leaving genuinely separate reels apart.
+     */
+    private fun mergeOverlapping(rects: List<Rect>): List<Rect> {
+        val merged = mutableListOf<Rect>()
+        for (rect in rects) {
+            val current = Rect(rect).apply { inset(-MERGE_INSET, -MERGE_INSET) }
+            var didMerge = true
+            while (didMerge) {
+                didMerge = false
+                val iterator = merged.iterator()
+                while (iterator.hasNext()) {
+                    val existing = iterator.next()
+                    if (Rect.intersects(existing, current)) {
+                        current.union(existing)
+                        iterator.remove()
+                        didMerge = true
+                    }
+                }
+            }
+            merged += current
+        }
+        // Undo the inflation so each cover is back to the real reel size.
+        return merged.map { Rect(it).apply { inset(MERGE_INSET, MERGE_INSET) } }
     }
 
     @Suppress("DEPRECATION")
