@@ -517,7 +517,7 @@ private fun AppsCoverageDialog(
                 AppToggleRow(
                     icon = Icons.Filled.MusicNote,
                     name = "TikTok",
-                    subtitle = "Sends the feed to Inbox; blocks videos",
+                    subtitle = "Blocks the whole app",
                     checked = coverTiktok,
                     onCheckedChange = onToggleTiktok
                 )

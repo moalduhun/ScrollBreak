@@ -7,7 +7,6 @@ import android.os.Looper
 import android.util.Log
 import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
-import android.view.accessibility.AccessibilityNodeInfo
 import com.moalduhun.scrollbreak.data.BlockerRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -129,11 +128,10 @@ class ReelsAccessibilityService : AccessibilityService() {
     }
 
     private fun dispatchCheck(now: Long, event: AccessibilityEvent, pkg: String) {
-        // TikTok is handled by navigation (redirect to Inbox / press Back) rather than the
-        // cover-overlay used for Instagram Reels and YouTube Shorts, since the whole app is
-        // short-form and the point is to steer the user to the safe screens.
+        // TikTok is blocked as a whole app (every screen is short-form), so it doesn't run the
+        // per-screen reel detection the other two use — any TikTok window gets covered.
         if (pkg == TIKTOK_PACKAGE) {
-            checkTikTok(now, event)
+            blockTikTok(event)
         } else {
             checkForShortForm(now, event, pkg)
         }
@@ -228,58 +226,17 @@ class ReelsAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * TikTok policy: classify the current screen and steer the user away from the video feed
-     * without a cover overlay — bounce the Home/Friends feed to the Inbox tab, and press Back
-     * out of a single opened video. Inbox, Profile, Search, Shop and photos are left alone.
-     * After acting, checks are suppressed briefly so the navigation we just triggered doesn't
-     * re-fire on its own transition events.
+     * TikTok is blocked wholesale — the entire app is short-form, so any TikTok window gets
+     * covered by the overlay. Unlike a reel/short, nothing is pressed Back here: the whole app
+     * stays covered until the user leaves it via "Go back", which exits TikTok entirely (see
+     * [handleGoBack]).
      */
-    private fun checkTikTok(now: Long, event: AccessibilityEvent) {
-        val root = rootInActiveWindow ?: return
-        val decision = try {
-            TikTokClassifier.classify(root, event.className)
-        } catch (t: Throwable) {
-            Log.w(DIAG_TAG, "TikTok classify failed", t)
-            return
-        }
-
-        Log.d(DIAG_TAG, "--- TT check windowClass=${event.className} decision=$decision ---")
-
-        when (decision) {
-            TikTokClassifier.Decision.REDIRECT_INBOX -> {
-                val inbox = findTikTokTab(root, TIKTOK_INBOX_DESC)
-                if (inbox != null && inbox.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                    Log.d(DIAG_TAG, ">>> TikTok: redirected feed to Inbox")
-                    suppressUntilMs = now + TIKTOK_NAV_SUPPRESSION_MS
-                    scope.launch { repository.recordBlock() }
-                }
-            }
-            TikTokClassifier.Decision.GO_BACK -> {
-                Log.d(DIAG_TAG, ">>> TikTok: backing out of a video")
-                performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-                suppressUntilMs = now + TIKTOK_NAV_SUPPRESSION_MS
-                scope.launch { repository.recordBlock() }
-            }
-            TikTokClassifier.Decision.ALLOW -> Unit
-        }
-    }
-
-    /** Finds a clickable bottom-tab node by its content-description (e.g. "Inbox"). */
-    private fun findTikTokTab(root: AccessibilityNodeInfo, desc: String): AccessibilityNodeInfo? {
-        val target = desc.lowercase()
-        val queue = ArrayDeque<AccessibilityNodeInfo>()
-        queue.add(root)
-        var visited = 0
-        while (queue.isNotEmpty() && visited < 600) {
-            val node = queue.removeFirst()
-            visited++
-            val nodeDesc = node.contentDescription?.toString()?.lowercase().orEmpty()
-            if (nodeDesc == target && node.isClickable) return node
-            for (i in 0 until node.childCount) {
-                node.getChild(i)?.let { queue.add(it) }
-            }
-        }
-        return null
+    private fun blockTikTok(event: AccessibilityEvent) {
+        Log.d(DIAG_TAG, ">>> BLOCKING TikTok (whole app) windowClass=${event.className}")
+        blockedPackage = TIKTOK_PACKAGE
+        overlayVisible = true
+        blockOverlay.show(onGoBack = ::handleGoBack)
+        scope.launch { repository.recordBlock() }
     }
 
     /**
@@ -288,7 +245,11 @@ class ReelsAccessibilityService : AccessibilityService() {
      * reel still finishing its exit transition behind the overlay from instantly re-blocking.
      */
     private fun handleGoBack() {
+        // TikTok is a fully-blocked app, so leaving means exiting TikTok altogether (Home).
+        // For a reel/short the app was already backed out at block time, so just hide.
+        val leaveApp = blockedPackage == TIKTOK_PACKAGE
         hideOverlay()
+        if (leaveApp) performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
     }
 
     private fun hideOverlay() {
@@ -371,12 +332,6 @@ class ReelsAccessibilityService : AccessibilityService() {
         private const val YOUTUBE_PACKAGE = "com.google.android.youtube"
         private const val TIKTOK_PACKAGE = "com.zhiliaoapp.musically"
         private const val SYSTEMUI_PACKAGE = "com.android.systemui"
-
-        private const val TIKTOK_INBOX_DESC = "inbox"
-
-        // After a TikTok redirect/back, pause checks so the navigation's own transition
-        // events don't immediately re-trigger it.
-        private const val TIKTOK_NAV_SUPPRESSION_MS = 1_200L
 
         // A tap counts as "on the content grid" only in this vertical band — above it is
         // the search bar/header/category tabs, below it is the bottom nav row.
