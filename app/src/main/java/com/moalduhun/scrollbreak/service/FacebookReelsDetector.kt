@@ -4,36 +4,38 @@ import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
 
 /**
- * Heuristic classifier for Facebook's Reels player. Mirrors [YouTubeShortsDetector] — walk
- * the tree, require independent signals to agree — but for the Facebook app.
+ * Classifier for Facebook's Reels player, tuned from a real ScrollBreakDiag capture.
  *
- * IMPORTANT: like the YouTube detector started out, these keywords/thresholds are a
- * conservative FIRST PASS and have NOT been confirmed against a real ScrollBreakDiag capture
- * of Facebook. Facebook (com.facebook.katana) heavily obfuscates class and resource names, so
- * this leans on the things that survive obfuscation:
- * - a "reel" hint in a content-description or resource id (Facebook labels the Reels surface
- *   and its entry points with the word),
- * - a full-screen video surface,
- * - the like / comment action rail.
+ * The tricky part on Facebook (com.facebook.katana) is that the normal News Feed embeds a
+ * "Reels" tray and the bottom nav has a "Reels" tab, so the word "reel" and the like/comment
+ * rail both appear on the ordinary feed — an early version keyed on those and wrongly blocked
+ * the feed.
  *
- * To avoid blocking the normal Facebook feed (whose inline videos also expose like/comment),
- * a "reel" hint must be present AND agree with either a full-screen video or the like+comment
- * rail. Everything reel/video-flavoured is logged as a diagnostic so a real capture can
- * replace these guesses, exactly as was done for Instagram and YouTube.
+ * The capture showed a clean separator instead: whenever the user is actually watching a reel
+ * full-screen, the tree contains a VISIBLE, near-full-width, tall node whose content
+ * description contains "reel":
+ * - the Reels tab player exposes `reels tab details` at ~1080x2051 (visible),
+ * - a reel opened inline from the feed exposes `reel` at ~1080x1350 (visible).
+ *
+ * On the feed those very nodes are present but collapsed (`0x2051`, visible=false), and the
+ * only visible "reel" nodes are small tray thumbnails (well under full width) or the tiny nav
+ * tab. So a single rule — a visible node with "reel" in its description that spans most of the
+ * width and a good chunk of the height — matches the player and not the feed. The like/comment
+ * rail is deliberately NOT used, since it's what caused the feed false-positive.
  */
 object FacebookReelsDetector {
 
-    private const val MAX_NODES = 600
+    private const val MAX_NODES = 700
     private const val MAX_DEPTH = 30
     private const val MAX_DIAGNOSTIC_LINES = 50
 
+    // A reel's full-screen container spans the whole width and most of the height. Feed tray
+    // thumbnails are ~684 wide (well under full) and the collapsed player nodes are 0-wide, so
+    // these thresholds keep the feed out.
     private const val FULLSCREEN_WIDTH_RATIO = 0.85f
-    private const val FULLSCREEN_HEIGHT_RATIO = 0.70f
+    private const val FULLSCREEN_HEIGHT_RATIO = 0.55f
 
-    private val REEL_HINT_KEYWORDS = listOf("reel")
-    private val VIDEO_SURFACE_CLASS_KEYWORDS = listOf("surfaceview", "textureview", "videoview")
-    private val LIKE_KEYWORDS = listOf("like")
-    private val COMMENT_KEYWORDS = listOf("comment")
+    private const val REEL_DESC_KEYWORD = "reel"
 
     private val DIAGNOSTIC_KEYWORDS =
         listOf("reel", "surface", "texture", "video", "player", "seek", "scrub", "like", "comment")
@@ -48,15 +50,14 @@ object FacebookReelsDetector {
         if (root == null) return DetectionResult(false, emptyList(), emptyList())
 
         val windowBounds = Rect().also { root.getBoundsInScreen(it) }
-        val hasUsableWindowBounds = windowBounds.width() > 0 && windowBounds.height() > 0
+        val winWidth = windowBounds.width()
+        val winHeight = windowBounds.height()
+        if (winWidth <= 0 || winHeight <= 0) return DetectionResult(false, emptyList(), emptyList())
 
         val matched = mutableSetOf<String>()
         val diagnostics = mutableListOf<String>()
         var nodesVisited = 0
-        var hasReelHint = false
-        var hasFullScreenVideo = false
-        var hasLikeAction = false
-        var hasCommentAction = false
+        var hasReelPlayer = false
 
         val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
         queue.add(root to 0)
@@ -70,26 +71,18 @@ object FacebookReelsDetector {
             val resourceId = node.viewIdResourceName?.lowercase().orEmpty()
             val contentDesc = node.contentDescription?.toString()?.lowercase().orEmpty()
 
-            if (isVisible && (REEL_HINT_KEYWORDS.any { resourceId.contains(it) || contentDesc.contains(it) })) {
-                matched += "hint:reel"
-                hasReelHint = true
-            }
-
-            if (!hasFullScreenVideo && isVisible && hasUsableWindowBounds &&
-                className.isNotEmpty() && VIDEO_SURFACE_CLASS_KEYWORDS.any { className.contains(it) }
-            ) {
-                val nodeBounds = Rect().also { node.getBoundsInScreen(it) }
-                val isFullScreen = nodeBounds.width() >= windowBounds.width() * FULLSCREEN_WIDTH_RATIO &&
-                    nodeBounds.height() >= windowBounds.height() * FULLSCREEN_HEIGHT_RATIO
+            // The one signal that separates the reel player from the feed: a visible node with
+            // "reel" in its description that spans most of the width and a good part of the
+            // height. On the feed the equivalent nodes are collapsed / not visible, and the
+            // visible reel references are small tray thumbnails.
+            if (!hasReelPlayer && isVisible && contentDesc.contains(REEL_DESC_KEYWORD)) {
+                val bounds = Rect().also { node.getBoundsInScreen(it) }
+                val isFullScreen = bounds.width() >= winWidth * FULLSCREEN_WIDTH_RATIO &&
+                    bounds.height() >= winHeight * FULLSCREEN_HEIGHT_RATIO
                 if (isFullScreen) {
-                    hasFullScreenVideo = true
-                    matched += "video:$className"
+                    hasReelPlayer = true
+                    matched += "reel_player:${contentDesc.take(30)}"
                 }
-            }
-
-            if (contentDesc.isNotEmpty()) {
-                if (LIKE_KEYWORDS.any { contentDesc.contains(it) }) hasLikeAction = true
-                if (COMMENT_KEYWORDS.any { contentDesc.contains(it) }) hasCommentAction = true
             }
 
             if (diagnostics.size < MAX_DIAGNOSTIC_LINES) {
@@ -117,14 +110,7 @@ object FacebookReelsDetector {
             recycleSafely(queue.removeFirst().first)
         }
 
-        if (hasLikeAction && hasCommentAction) matched += "actions:like_and_comment"
-
-        // Strict until real captures let us relax it: a reel hint must be present and agree
-        // with either a full-screen video or the like+comment rail, so the normal feed isn't
-        // blocked at the cost of maybe missing reels until tuned.
-        val isReels = hasReelHint && (hasFullScreenVideo || (hasLikeAction && hasCommentAction))
-
-        return DetectionResult(isReels, matched.toList(), diagnostics)
+        return DetectionResult(hasReelPlayer, matched.toList(), diagnostics)
     }
 
     @Suppress("DEPRECATION")
