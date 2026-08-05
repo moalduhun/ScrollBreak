@@ -115,11 +115,17 @@ class ReelsAccessibilityService : AccessibilityService() {
         if (now < suppressUntilMs) return
 
         when (event.eventType) {
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> dispatchCheck(now, event, pkg)
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
+                // A window-state change is the app coming to the foreground / switching
+                // screens — check right away, then fire a short burst of rapid re-checks
+                // because the view tree is often not fully populated on this first event.
+                dispatchCheck(now, pkg, event.className)
+                scheduleForegroundBurst(pkg, event.className)
+            }
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
                 if (now - lastContentCheckMs >= CONTENT_CHECK_THROTTLE_MS) {
                     lastContentCheckMs = now
-                    dispatchCheck(now, event, pkg)
+                    dispatchCheck(now, pkg, event.className)
                 }
             }
             // A content-grid tap is only a signal for Instagram's Explore path.
@@ -127,13 +133,32 @@ class ReelsAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun dispatchCheck(now: Long, event: AccessibilityEvent, pkg: String) {
+    private fun dispatchCheck(now: Long, pkg: String, windowClassName: CharSequence?) {
         // TikTok is blocked as a whole app (every screen is short-form), so it doesn't run the
         // per-screen reel detection the other two use — any TikTok window gets covered.
         if (pkg == TIKTOK_PACKAGE) {
-            blockTikTok(event)
+            blockTikTok(windowClassName)
         } else {
-            checkForShortForm(now, event, pkg)
+            checkForShortForm(now, pkg, windowClassName)
+        }
+    }
+
+    /**
+     * Fires a few quick re-checks right after a covered app is foregrounded so the block lands
+     * the instant its content is ready, instead of waiting on the next content-changed event.
+     * Each tick bails if a block is already up, we're in the post-Go-back suppression window,
+     * or the covered app is no longer the foreground window (the user switched away in time).
+     */
+    private fun scheduleForegroundBurst(pkg: String, windowClassName: CharSequence?) {
+        val className = windowClassName?.toString()
+        for (delay in FOREGROUND_BURST_DELAYS_MS) {
+            mainHandler.postDelayed({
+                if (overlayVisible) return@postDelayed
+                val ts = System.currentTimeMillis()
+                if (ts < suppressUntilMs) return@postDelayed
+                if (rootInActiveWindow?.packageName?.toString() != pkg) return@postDelayed
+                dispatchCheck(ts, pkg, className)
+            }, delay)
         }
     }
 
@@ -176,7 +201,7 @@ class ReelsAccessibilityService : AccessibilityService() {
      * fires. The two paths are kept fully separate so YouTube support can't affect the
      * confirmed-working Instagram detection.
      */
-    private fun checkForShortForm(now: Long, event: AccessibilityEvent, pkg: String) {
+    private fun checkForShortForm(now: Long, pkg: String, windowClassName: CharSequence?) {
         val root = rootInActiveWindow ?: return
 
         val isBlocked: Boolean
@@ -189,13 +214,13 @@ class ReelsAccessibilityService : AccessibilityService() {
                 Log.w(DIAG_TAG, "YouTube detection failed", t)
                 return
             }
-            logYouTubeDiagnostics(event, result)
+            logYouTubeDiagnostics(windowClassName, result)
             isBlocked = result.isShorts
             signals = result.matchedSignals
         } else {
             val recentContentTap = now - lastContentTapMs < CONTENT_TAP_WINDOW_MS
             val result = try {
-                ReelsDetector.evaluate(root, event.className, recentContentTap, lastKnownTab)
+                ReelsDetector.evaluate(root, windowClassName, recentContentTap, lastKnownTab)
             } catch (t: Throwable) {
                 // Never let a malformed node tree crash the accessibility service — that
                 // would silently disable blocking until the user re-enables it manually.
@@ -205,7 +230,7 @@ class ReelsAccessibilityService : AccessibilityService() {
             if (result.detectedTabLabel != null) {
                 lastKnownTab = result.detectedTabLabel
             }
-            logDiagnostics(event, result)
+            logDiagnostics(windowClassName, result)
             isBlocked = result.isReels
             signals = result.matchedSignals
         }
@@ -231,8 +256,8 @@ class ReelsAccessibilityService : AccessibilityService() {
      * stays covered until the user leaves it via "Go back", which exits TikTok entirely (see
      * [handleGoBack]).
      */
-    private fun blockTikTok(event: AccessibilityEvent) {
-        Log.d(DIAG_TAG, ">>> BLOCKING TikTok (whole app) windowClass=${event.className}")
+    private fun blockTikTok(windowClassName: CharSequence?) {
+        Log.d(DIAG_TAG, ">>> BLOCKING TikTok (whole app) windowClass=$windowClassName")
         blockedPackage = TIKTOK_PACKAGE
         overlayVisible = true
         blockOverlay.show(onGoBack = ::handleGoBack)
@@ -277,10 +302,9 @@ class ReelsAccessibilityService : AccessibilityService() {
         return super.onKeyEvent(event)
     }
 
-    private fun logYouTubeDiagnostics(event: AccessibilityEvent, result: YouTubeShortsDetector.DetectionResult) {
-        val eventName = AccessibilityEvent.eventTypeToString(event.eventType)
-        val windowClass = event.className ?: "unknown"
-        Log.d(DIAG_TAG, "--- YT check event=$eventName windowClass=$windowClass isShorts=${result.isShorts} ---")
+    private fun logYouTubeDiagnostics(windowClassName: CharSequence?, result: YouTubeShortsDetector.DetectionResult) {
+        val windowClass = windowClassName ?: "unknown"
+        Log.d(DIAG_TAG, "--- YT check windowClass=$windowClass isShorts=${result.isShorts} ---")
         if (result.matchedSignals.isNotEmpty()) {
             Log.d(DIAG_TAG, "YT matched=${result.matchedSignals}")
         }
@@ -295,13 +319,12 @@ class ReelsAccessibilityService : AccessibilityService() {
      * Prints exactly what the detector saw on this screen, so real behaviour can be captured
      * with `adb logcat -s ScrollBreakDiag:V` and used to tune the keywords/thresholds.
      */
-    private fun logDiagnostics(event: AccessibilityEvent, result: ReelsDetector.DetectionResult) {
-        val eventName = AccessibilityEvent.eventTypeToString(event.eventType)
-        val windowClass = event.className ?: "unknown"
+    private fun logDiagnostics(windowClassName: CharSequence?, result: ReelsDetector.DetectionResult) {
+        val windowClass = windowClassName ?: "unknown"
         Log.d(
             DIAG_TAG,
-            "--- check event=$eventName windowClass=$windowClass eventWindowId=${event.windowId} " +
-                "rootWindowId=${rootInActiveWindow?.windowId} lastKnownTab=$lastKnownTab isReels=${result.isReels} ---"
+            "--- check windowClass=$windowClass rootWindowId=${rootInActiveWindow?.windowId} " +
+                "lastKnownTab=$lastKnownTab isReels=${result.isReels} ---"
         )
         if (result.matchedSignals.isNotEmpty()) {
             Log.d(DIAG_TAG, "matched=${result.matchedSignals}")
@@ -345,6 +368,10 @@ class ReelsAccessibilityService : AccessibilityService() {
         // Limits how often content-changed events (which fire constantly while scrolling a
         // normal feed) get re-checked; window-state changes are always checked immediately.
         private const val CONTENT_CHECK_THROTTLE_MS = 120L
+
+        // Right after a covered app is foregrounded, re-check on this spread so the block lands
+        // as soon as the view tree is ready rather than waiting for the next content event.
+        private val FOREGROUND_BURST_DELAYS_MS = longArrayOf(40L, 120L, 250L, 450L, 800L)
 
         // After "Go back", detection is paused briefly so the reel still finishing its exit
         // transition can't be seen and re-blocked.
